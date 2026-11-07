@@ -14,8 +14,8 @@ Built in Rust with raw `std::net` TCP + UDP sockets for the CS411 Computer Netwo
 |---|---|
 | 1. TCP: register/login, lobby, rooms, ready, chat, match start/end, disconnect handling | ✅ done |
 | 2. UDP game loop: inputs, snapshots, physics, stomps/pits, rounds, reliable kill events | ✅ done |
-| 3. Weapons (Ping Pistol, Broadcast Shotgun, Fork Bomb, Firewall, Checksum Blade) | ⏳ next |
-| 4. Prediction, interpolation, lag compensation | |
+| 3. Weapons (Ping Pistol, Broadcast Shotgun, Fork Bomb, Firewall, Checksum Blade), pickup/throw/stun, spawners | ✅ done |
+| 4. Prediction, interpolation, lag compensation | ⏳ next |
 | 5. Cross-network deploy (bonus) | |
 
 ## Requirements
@@ -36,8 +36,19 @@ Find the server's LAN IP with `ipconfig getifaddr en0` (macOS), `hostname -I` (L
 
 Then: register → create a port (room) → others join → everyone presses **READY** → match starts when the port is full (3/3), or the host presses **START** with 2.
 
-**Controls:** move `A/D` or arrows · jump `W/Space/Up` (hold for higher) · drop through a platform `S + jump` · forfeit `Esc`.
-Land on another packet's header to drop it; pits drop you into the backbone. Last packet standing wins the round, first to 5 rounds wins the match.
+**Controls**
+
+| Action | WASD layout | Arrow layout |
+|---|---|---|
+| Move | `A` / `D` | `←` / `→` |
+| Jump (hold for higher) | `Space` | `Z` |
+| Aim up | `W` | `↑` |
+| Drop through platform | `S` + jump | `↓` + jump |
+| Shoot / use | `J` | `X` |
+| Pick up / throw | `K` | `C` |
+| Forfeit | `Esc` | `Esc` |
+
+One hit drops a packet. Grab weapons from the blue spawner pads: **Ping Pistol** (hitscan), **Broadcast Shotgun** (spread, recoil), **Fork Bomb** (bounces, explodes, forks into two), **Firewall** (blocks shots for 5 s), **Checksum Blade** (melee, reflects shots mid-swing). Throw an empty gun to stun. Landing on a header or falling into a pit also drops you. Last packet standing wins the round; first to 5 rounds wins.
 
 The footer shows TCP and UDP round-trip times; in a match the bottom-left shows snapshot rate, measured loss and how many inputs are still unacknowledged.
 
@@ -48,7 +59,7 @@ The footer shows TCP and UDP round-trip times; in a match the bottom-left shows 
 | `--loss 20` | Drop 20% of UDP packets in each direction (shows the game survives loss) |
 | `--login name:pass` | Register or log in automatically |
 | `--autojoin` | Join the first open port (or create one) and ready up |
-| `--bot` | Play with random inputs |
+| `--bot` | Sparring bot: grabs weapons, chases the nearest packet, lines up and fires |
 
 Quick local 3-player session (one terminal each, a few seconds apart):
 

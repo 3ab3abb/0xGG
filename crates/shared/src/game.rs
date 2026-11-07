@@ -39,8 +39,8 @@ pub mod buttons {
     pub const DOWN: u16 = 1 << 3;
     pub const AIM_UP: u16 = 1 << 4;
     pub const SHOOT: u16 = 1 << 5;
-    pub const PICKUP: u16 = 1 << 6;
-    pub const THROW: u16 = 1 << 7;
+    /// Pick up the nearest weapon, or throw the held one.
+    pub const INTERACT: u16 = 1 << 6;
 }
 
 // ------------------------------------------------------------------ maps
@@ -61,7 +61,7 @@ pub struct Map {
     tiles: Vec<Tile>,
     /// Player spawn positions (top-left, pixels).
     pub spawns: Vec<(f32, f32)>,
-    /// Weapon spawner positions (milestone 3).
+    /// Weapon spawner positions: (center x, floor y) of the cell.
     pub weapon_spawns: Vec<(f32, f32)>,
 }
 
@@ -106,7 +106,7 @@ impl Map {
                         Tile::Empty
                     }
                     'W' => {
-                        weapon_spawns.push((px, py));
+                        weapon_spawns.push(((x as f32 + 0.5) * TILE, (y + 1) as f32 * TILE));
                         Tile::Empty
                     }
                     _ => Tile::Empty,
@@ -165,6 +165,8 @@ pub struct PlayerSim {
     pub jump_buffer: u8,
     pub drop_timer: u8,
     pub prev_buttons: u16,
+    /// Ticks left stunned (hit by a thrown item): inputs are ignored.
+    pub stun: u8,
 }
 
 fn approach(v: f32, target: f32, delta: f32) -> f32 {
@@ -210,6 +212,12 @@ impl PlayerSim {
     /// Advance one tick with the given buttons held.
     pub fn step(&mut self, map: &Map, b: u16) {
         use buttons::*;
+        let b = if self.stun > 0 {
+            self.stun -= 1;
+            0
+        } else {
+            b
+        };
         let held = |m: u16| b & m != 0;
         let pressed = |m: u16| b & m != 0 && self.prev_buttons & m == 0;
 

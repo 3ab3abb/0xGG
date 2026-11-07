@@ -3,7 +3,7 @@
 //! Every tick (60 Hz):
 //! 1. drain events (inputs routed by the UDP thread, leaves from the lobby);
 //! 2. apply one buffered input per player and step the shared physics;
-//! 3. resolve combat (stomps, pits) and round flow;
+//! 3. resolve combat (weapons, stomps, pits; see [`combat`]) and round flow;
 //! 4. every 2nd tick, send each client a full snapshot over UDP.
 //!
 //! When the match is decided (or fewer than 2 players remain) the thread
@@ -18,16 +18,20 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use gg_shared::constants::{MATCH_COUNTDOWN_MS, MIN_PLAYERS_TO_START, ROUNDS_TO_WIN};
 use gg_shared::game::{
-    overlap, Map, PlayerSim, PLAYER_H, PLAYER_W, SNAPSHOT_EVERY, STOMP_BOUNCE, TICK_RATE,
+    buttons, overlap, Map, PlayerSim, PLAYER_H, PLAYER_W, SNAPSHOT_EVERY, STOMP_BOUNCE, TICK_RATE,
 };
 use gg_shared::protocol::MatchEndReason;
 use gg_shared::udp::{
-    self, flags, Event, EventKind, InputFrame, KillCause, PlayerState, RoundPhase, ServerPacket,
-    Snapshot, MAX_EVENTS_PER_SNAPSHOT,
+    self, flags, Event, EventKind, FirewallState, InputFrame, ItemState, KillCause, PlayerState,
+    ProjectileState, RoundPhase, ServerPacket, Snapshot, MAX_EVENTS_PER_SNAPSHOT,
+    MAX_PROJECTILES_PER_SNAPSHOT,
 };
 use log::{debug, info, warn};
 
 use crate::conn::LobbyEvent;
+
+mod combat;
+use combat::{Firewall, Held, Item, Projectile, Spawner};
 
 const fn secs(s: f32) -> u32 {
     (s * TICK_RATE as f32) as u32
@@ -81,9 +85,16 @@ struct Player {
     last_queued_seq: u32,
     last_applied_seq: u32,
     buttons: u16,
+    /// Buttons applied last tick, to detect presses (SHOOT/INTERACT edges).
+    prev_buttons: u16,
     outbox: VecDeque<Event>,
     next_event_id: u32,
     stats: SlotStats,
+    held: Option<Held>,
+    aim_up: bool,
+    cooldown: u8,
+    /// Checksum Blade swing ticks left.
+    swing: u8,
 }
 
 struct Game {
@@ -94,6 +105,12 @@ struct Game {
     tick: u32,
     round: u8,
     phase: Phase,
+    items: Vec<Item>,
+    projectiles: Vec<Projectile>,
+    firewalls: Vec<Firewall>,
+    spawners: Vec<Spawner>,
+    next_entity_id: u16,
+    rng: u64,
 }
 
 pub fn spawn(
@@ -130,6 +147,11 @@ impl Game {
                 last_queued_seq: 0,
                 last_applied_seq: 0,
                 buttons: 0,
+                prev_buttons: 0,
+                held: None,
+                aim_up: false,
+                cooldown: 0,
+                swing: 0,
                 outbox: VecDeque::new(),
                 next_event_id: 1,
                 stats: SlotStats {
@@ -140,6 +162,19 @@ impl Game {
                 },
             })
             .collect();
+        let spawners = map
+            .weapon_spawns
+            .iter()
+            .map(|&(x, y)| Spawner {
+                x,
+                y,
+                item: None,
+                respawn: 0,
+            })
+            .collect();
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
         let mut game = Game {
             room_id,
             map,
@@ -148,6 +183,12 @@ impl Game {
             tick: 0,
             round: 0,
             phase: Phase::Countdown(0),
+            items: Vec::new(),
+            projectiles: Vec::new(),
+            firewalls: Vec::new(),
+            spawners,
+            next_entity_id: 0,
+            rng: seed | 1,
         };
         game.start_round(FIRST_COUNTDOWN_TICKS);
         game
@@ -261,7 +302,11 @@ impl Game {
             let (x, y) = spawns[(i * spawns.len() / 3 + offset) % spawns.len()];
             p.sim = PlayerSim::spawn_at(x, y, x < center);
             p.sim.prev_buttons = p.buttons; // a held jump must not fire on spawn
+            p.held = None;
+            p.cooldown = 0;
+            p.swing = 0;
         }
+        self.reset_arena();
         self.phase = Phase::Countdown(countdown);
     }
 
@@ -280,6 +325,17 @@ impl Game {
                 p.last_applied_seq = f.seq;
             }
         }
+        // Edge detection happens here, on the server's own tick, so a press
+        // is never lost even if the packet carrying it arrived late.
+        let pressed: Vec<u16> = self
+            .players
+            .iter_mut()
+            .map(|p| {
+                let pressed = p.buttons & !p.prev_buttons;
+                p.prev_buttons = p.buttons;
+                pressed
+            })
+            .collect();
 
         match self.phase {
             Phase::Countdown(left) => {
@@ -293,7 +349,7 @@ impl Game {
                 };
             }
             Phase::Playing(left) => {
-                self.simulate(true);
+                self.simulate(true, &pressed);
                 let alive: Vec<u8> = self
                     .players
                     .iter()
@@ -329,7 +385,7 @@ impl Game {
                 }
             }
             Phase::RoundOver { winner, left } => {
-                self.simulate(false); // victory lap: movement only, no kills
+                self.simulate(false, &pressed); // victory lap: movement only, no kills
                 if left <= 1 {
                     let won = self
                         .players
@@ -350,16 +406,20 @@ impl Game {
         false
     }
 
-    fn simulate(&mut self, combat: bool) {
+    fn simulate(&mut self, combat: bool, pressed: &[u16]) {
         let prev: Vec<(f32, f32)> = self.players.iter().map(|p| (p.sim.x, p.sim.y)).collect();
-        for p in self.players.iter_mut().filter(|p| p.alive) {
-            p.sim.step(&self.map, p.buttons);
+        for p in self.players.iter_mut() {
+            p.aim_up = p.alive && p.buttons & buttons::AIM_UP != 0;
+            if p.alive {
+                p.sim.step(&self.map, p.buttons);
+            }
         }
         if !combat {
             return;
         }
+        self.combat_tick(pressed);
 
-        let mut kills: Vec<(Option<usize>, usize, KillCause)> = Vec::new();
+        let mut stomps: Vec<(usize, usize)> = Vec::new();
         for (i, a) in self.players.iter().enumerate() {
             for (j, b) in self.players.iter().enumerate() {
                 if i == j || !a.alive || !b.alive || a.sim.vy <= 0.0 {
@@ -370,38 +430,20 @@ impl Game {
                 );
                 let came_from_above = prev[i].1 + PLAYER_H <= prev[j].1 + STOMP_TOLERANCE;
                 if touching && came_from_above {
-                    kills.push((Some(i), j, KillCause::Stomp));
+                    stomps.push((i, j));
                 }
             }
         }
-        for (j, p) in self.players.iter().enumerate() {
-            if p.alive && p.sim.fell_out(&self.map) {
-                kills.push((None, j, KillCause::Fall));
+        for (i, j) in stomps {
+            if self.players[i].alive && self.players[j].alive {
+                self.kill(j, Some(i), KillCause::Stomp);
+                self.players[i].sim.vy = STOMP_BOUNCE;
             }
         }
-
-        for (killer, victim, cause) in kills {
-            if !self.players[victim].alive {
-                continue; // already dropped this tick
+        for j in 0..self.players.len() {
+            if self.players[j].alive && self.players[j].sim.fell_out(&self.map) {
+                self.kill(j, None, KillCause::Fall);
             }
-            self.players[victim].alive = false;
-            self.players[victim].stats.deaths += 1;
-            let killer_slot = killer.map(|k| {
-                let k = &mut self.players[k];
-                k.stats.kills += 1;
-                k.sim.vy = STOMP_BOUNCE;
-                k.slot
-            });
-            let victim_slot = self.players[victim].slot;
-            debug!(
-                "room {}: 0x{victim_slot:02X} dropped by {killer_slot:?} ({cause:?})",
-                self.room_id
-            );
-            self.push_event(EventKind::Kill {
-                killer: killer_slot,
-                victim: victim_slot,
-                cause,
-            });
         }
     }
 
@@ -451,6 +493,15 @@ impl Game {
                 if p.connected {
                     f |= flags::CONNECTED;
                 }
+                if p.aim_up {
+                    f |= flags::AIMING_UP;
+                }
+                if p.sim.stun > 0 {
+                    f |= flags::STUNNED;
+                }
+                if p.swing > 0 {
+                    f |= flags::SWINGING;
+                }
                 PlayerState {
                     slot: p.slot,
                     x: p.sim.x,
@@ -458,7 +509,42 @@ impl Game {
                     vx: p.sim.vx,
                     vy: p.sim.vy,
                     flags: f,
+                    weapon: p.held.map(|h| h.weapon),
+                    ammo: p.held.map_or(0, |h| h.ammo),
                 }
+            })
+            .collect();
+        let items: Vec<ItemState> = self
+            .items
+            .iter()
+            .map(|it| ItemState {
+                id: it.id,
+                weapon: it.weapon,
+                ammo: it.ammo,
+                x: it.x,
+                y: it.y,
+                flying: !it.grounded,
+            })
+            .collect();
+        let projectiles: Vec<ProjectileState> = self
+            .projectiles
+            .iter()
+            .take(MAX_PROJECTILES_PER_SNAPSHOT)
+            .map(|pr| ProjectileState {
+                id: pr.id,
+                kind: pr.kind,
+                x: pr.x,
+                y: pr.y,
+            })
+            .collect();
+        let firewalls: Vec<FirewallState> = self
+            .firewalls
+            .iter()
+            .map(|f| FirewallState {
+                id: f.id,
+                x: f.x,
+                y: f.y,
+                ms_left: ticks_to_ms(f.ticks) as u16,
             })
             .collect();
 
@@ -471,6 +557,9 @@ impl Game {
                 phase,
                 scores: scores.clone(),
                 players: states.clone(),
+                items: items.clone(),
+                projectiles: projectiles.clone(),
+                firewalls: firewalls.clone(),
                 events: p
                     .outbox
                     .iter()
@@ -655,5 +744,309 @@ mod tests {
         });
         assert!(g.players[0].outbox.is_empty());
         assert_eq!(g.players[1].outbox.len(), 2, "acks are per client");
+    }
+
+    // ------------------------------------------------------------ weapons
+
+    use gg_shared::game::buttons::{AIM_UP, INTERACT, SHOOT};
+    use gg_shared::weapons::Weapon;
+
+    /// Floor segment x 240..464, top at y=320 (row 20 of the router map).
+    const FLOOR_Y: f32 = 320.0 - PLAYER_H;
+
+    /// Playing phase, arena cleared, 0x01 at x=260 facing right, 0x02 at x=360
+    /// facing left, 0x03 parked far away on the left.
+    fn arena() -> Game {
+        let mut g = game();
+        run_until_playing(&mut g);
+        g.items.clear();
+        for s in &mut g.spawners {
+            s.item = Some(9999); // keep spawners from restocking mid-test
+        }
+        for (i, (x, right)) in [(260.0, true), (360.0, false), (40.0, true)]
+            .into_iter()
+            .enumerate()
+        {
+            let y = if i == 2 { 128.0 - PLAYER_H } else { FLOOR_Y };
+            g.players[i].sim = PlayerSim::spawn_at(x, y, right);
+            g.players[i].sim.grounded = true;
+            g.players[i].held = None;
+        }
+        g
+    }
+
+    fn give(g: &mut Game, i: usize, w: Weapon) {
+        g.players[i].held = Some(Held {
+            weapon: w,
+            ammo: w.max_ammo(),
+        });
+        g.players[i].cooldown = 0;
+    }
+
+    /// Hold `b` for one tick, then release for one tick.
+    fn press(g: &mut Game, i: usize, b: u16) {
+        g.players[i].buttons = b;
+        g.step();
+        g.players[i].buttons = 0;
+        g.step();
+    }
+
+    fn kills(g: &Game) -> Vec<(Option<u8>, u8, KillCause)> {
+        g.players[0]
+            .outbox
+            .iter()
+            .filter_map(|e| match e.kind {
+                EventKind::Kill {
+                    killer,
+                    victim,
+                    cause,
+                } => Some((killer, victim, cause)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ping_pistol_hits_in_line_and_uses_ammo() {
+        let mut g = arena();
+        give(&mut g, 0, Weapon::PingPistol);
+        press(&mut g, 0, SHOOT);
+        assert!(!g.players[1].alive, "pistol missed");
+        assert_eq!(g.players[0].held.unwrap().ammo, 5);
+        assert_eq!(
+            kills(&g),
+            vec![(Some(1), 2, KillCause::Weapon(Weapon::PingPistol))]
+        );
+        assert!(g.players[0]
+            .outbox
+            .iter()
+            .any(|e| matches!(e.kind, EventKind::Shot { .. })));
+    }
+
+    #[test]
+    fn empty_gun_does_nothing() {
+        let mut g = arena();
+        g.players[0].held = Some(Held {
+            weapon: Weapon::PingPistol,
+            ammo: 0,
+        });
+        press(&mut g, 0, SHOOT);
+        assert!(g.players[1].alive);
+    }
+
+    #[test]
+    fn holding_shoot_fires_once() {
+        let mut g = arena();
+        give(&mut g, 0, Weapon::PingPistol);
+        g.players[1].sim.x = 500.0; // out of the way
+        g.players[0].buttons = SHOOT;
+        for _ in 0..60 {
+            g.step();
+        }
+        assert_eq!(
+            g.players[0].held.unwrap().ammo,
+            5,
+            "held trigger must not autofire"
+        );
+    }
+
+    #[test]
+    fn firewall_blocks_shots() {
+        let mut g = arena();
+        give(&mut g, 1, Weapon::Firewall);
+        press(&mut g, 1, SHOOT); // 0x02 faces left, wall goes up between them
+        assert_eq!(g.firewalls.len(), 1);
+        assert!(g.players[1].held.is_none(), "firewall is consumable");
+        give(&mut g, 0, Weapon::PingPistol);
+        press(&mut g, 0, SHOOT);
+        assert!(g.players[1].alive, "shot went through the firewall");
+        for _ in 0..secs(5.5) {
+            g.step();
+        }
+        assert!(g.firewalls.is_empty(), "firewall should expire");
+    }
+
+    #[test]
+    fn checksum_blade_reflects_ping() {
+        let mut g = arena();
+        give(&mut g, 0, Weapon::PingPistol);
+        give(&mut g, 1, Weapon::ChecksumBlade);
+        g.players[1].buttons = SHOOT; // start swinging
+        g.players[0].buttons = SHOOT; // shoot into the swing, same tick
+        g.step();
+        assert!(g.players[1].alive, "blade should have reflected the shot");
+        assert!(
+            !g.players[0].alive,
+            "reflected shot should drop the shooter"
+        );
+        assert_eq!(kills(&g), vec![(Some(2), 1, KillCause::Reflect)]);
+    }
+
+    #[test]
+    fn checksum_blade_melee_kill() {
+        let mut g = arena();
+        give(&mut g, 0, Weapon::ChecksumBlade);
+        g.players[1].sim.x = 260.0 + PLAYER_W + 6.0;
+        press(&mut g, 0, SHOOT);
+        assert!(!g.players[1].alive);
+        assert_eq!(
+            g.players[0].held.unwrap().weapon,
+            Weapon::ChecksumBlade,
+            "blade is unlimited"
+        );
+    }
+
+    #[test]
+    fn shotgun_pellets_kill_at_close_range_with_recoil() {
+        let mut g = arena();
+        give(&mut g, 0, Weapon::BroadcastShotgun);
+        g.players[1].sim.x = 300.0;
+        g.players[0].buttons = SHOOT;
+        g.step();
+        assert!(
+            g.players[0].sim.vx < 0.0,
+            "recoil should push the shooter back"
+        );
+        g.players[0].buttons = 0;
+        for _ in 0..20 {
+            g.step();
+        }
+        assert!(!g.players[1].alive);
+        assert!(g.projectiles.is_empty(), "pellets expire");
+        assert_eq!(g.players[0].held.unwrap().ammo, 1);
+    }
+
+    #[test]
+    fn fork_bomb_explodes_then_forks() {
+        let mut g = arena();
+        give(&mut g, 0, Weapon::ForkBomb);
+        g.players[1].sim.x = 440.0;
+        press(&mut g, 0, AIM_UP | SHOOT);
+        assert!(g.players[0].held.is_none(), "bomb is consumable");
+        let mut explosions = 0;
+        for _ in 0..secs(3.0) {
+            g.step();
+        }
+        for e in &g.players[2].outbox {
+            if matches!(e.kind, EventKind::Explosion { .. }) {
+                explosions += 1;
+            }
+        }
+        assert_eq!(explosions, 3, "1 bomb + 2 forked shards");
+    }
+
+    #[test]
+    fn own_bomb_drops_you_without_kill_credit() {
+        let mut g = arena();
+        let (x, y) = (g.players[0].sim.x + 6.0, g.players[0].sim.y + 7.0);
+        g.projectiles.push(Projectile {
+            id: 1,
+            kind: gg_shared::udp::ProjectileKind::Bomb,
+            owner: 0,
+            x,
+            y,
+            vx: 0.0,
+            vy: 0.0,
+            ttl: 1,
+            reflected: false,
+        });
+        g.step();
+        assert!(!g.players[0].alive, "own bomb should drop the thrower");
+        assert_eq!(
+            g.players[0].stats.kills, 0,
+            "self-drops don't count as kills"
+        );
+        assert_eq!(g.projectiles.len(), 2, "parent bomb forked into 2 shards");
+    }
+
+    #[test]
+    fn pickup_throw_and_stun() {
+        let mut g = arena();
+        let id = 777;
+        g.items.push(Item {
+            id,
+            weapon: Weapon::PingPistol,
+            ammo: 3,
+            x: 262.0,
+            y: 320.0 - gg_shared::weapons::ITEM_H,
+            vx: 0.0,
+            vy: 0.0,
+            thrown_by: None,
+            grace: 0,
+            spawner: None,
+            grounded: true,
+        });
+        press(&mut g, 0, INTERACT);
+        let held = g.players[0].held.expect("should have picked it up");
+        assert_eq!((held.weapon, held.ammo), (Weapon::PingPistol, 3));
+        assert!(g.items.is_empty());
+
+        g.players[1].sim.x = 330.0;
+        press(&mut g, 0, INTERACT); // throw at 0x02
+        assert!(g.players[0].held.is_none());
+        for _ in 0..20 {
+            g.step();
+            if g.players[1].sim.stun > 0 {
+                break;
+            }
+        }
+        assert!(g.players[1].sim.stun > 0, "thrown pistol should stun");
+        assert!(g.players[1].alive, "a stun is not a kill");
+        assert!(g.players[0]
+            .outbox
+            .iter()
+            .any(|e| matches!(e.kind, EventKind::Stun { by: 1, victim: 2 })));
+    }
+
+    #[test]
+    fn death_drops_weapon_and_spawners_restock() {
+        let mut g = game();
+        assert_eq!(
+            g.items.len(),
+            g.map.weapon_spawns.len(),
+            "every spawner stocked at round start"
+        );
+        run_until_playing(&mut g);
+        give(&mut g, 1, Weapon::BroadcastShotgun);
+        g.kill(1, None, KillCause::Fall);
+        assert!(g
+            .items
+            .iter()
+            .any(|i| i.weapon == Weapon::BroadcastShotgun && i.spawner.is_none()));
+    }
+
+    #[test]
+    fn snapshot_with_weapons_fits() {
+        let mut g = arena();
+        for i in 0..3 {
+            give(&mut g, i, Weapon::BroadcastShotgun);
+        }
+        for i in 0..3 {
+            g.players[i].buttons = SHOOT;
+        }
+        g.step();
+        let snap = Snapshot {
+            tick: g.tick,
+            ack_input_seq: 0,
+            round: g.round,
+            phase: RoundPhase::Playing { ms_left: 0 },
+            scores: vec![],
+            players: vec![],
+            items: vec![],
+            projectiles: g
+                .projectiles
+                .iter()
+                .map(|p| ProjectileState {
+                    id: p.id,
+                    kind: p.kind,
+                    x: p.x,
+                    y: p.y,
+                })
+                .collect(),
+            firewalls: vec![],
+            events: vec![],
+        };
+        assert_eq!(snap.projectiles.len(), 15);
+        assert!(udp::encode(&ServerPacket::Snapshot(snap)).is_ok());
     }
 }

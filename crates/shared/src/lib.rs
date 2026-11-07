@@ -6,3 +6,4 @@ pub mod framing;
 pub mod game;
 pub mod protocol;
 pub mod udp;
+pub mod weapons;

@@ -7,6 +7,7 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::constants::PROTOCOL_VERSION;
+use crate::weapons::Weapon;
 
 pub const MAGIC: [u8; 2] = *b"GG";
 pub const HEADER_LEN: usize = 3;
@@ -16,7 +17,8 @@ pub const MAX_DATAGRAM: usize = 1200;
 /// Each Input packet repeats the newest N input frames, so a lost packet
 /// costs nothing unless N packets in a row are lost.
 pub const INPUT_REDUNDANCY: usize = 3;
-pub const MAX_EVENTS_PER_SNAPSHOT: usize = 16;
+pub const MAX_EVENTS_PER_SNAPSHOT: usize = 20;
+pub const MAX_PROJECTILES_PER_SNAPSHOT: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputFrame {
@@ -65,6 +67,10 @@ pub struct Snapshot {
     /// `(slot, round_wins)`.
     pub scores: Vec<(u8, u8)>,
     pub players: Vec<PlayerState>,
+    /// Weapons lying on the map or flying after a throw.
+    pub items: Vec<ItemState>,
+    pub projectiles: Vec<ProjectileState>,
+    pub firewalls: Vec<FirewallState>,
     /// Reliable events this client has not acknowledged yet (§5.4).
     pub events: Vec<Event>,
 }
@@ -84,6 +90,8 @@ pub struct PlayerState {
     pub vx: f32,
     pub vy: f32,
     pub flags: u8,
+    pub weapon: Option<Weapon>,
+    pub ammo: u8,
 }
 
 pub mod flags {
@@ -91,6 +99,44 @@ pub mod flags {
     pub const FACING_RIGHT: u8 = 1 << 1;
     pub const GROUNDED: u8 = 1 << 2;
     pub const CONNECTED: u8 = 1 << 3;
+    pub const AIMING_UP: u8 = 1 << 4;
+    pub const STUNNED: u8 = 1 << 5;
+    /// Checksum Blade swing active (hits and reflects).
+    pub const SWINGING: u8 = 1 << 6;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ItemState {
+    pub id: u16,
+    pub weapon: Weapon,
+    pub ammo: u8,
+    pub x: f32,
+    pub y: f32,
+    pub flying: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProjectileKind {
+    Pellet,
+    Bomb,
+    /// Smaller child bomb from a fork.
+    Shard,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ProjectileState {
+    pub id: u16,
+    pub kind: ProjectileKind,
+    pub x: f32,
+    pub y: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FirewallState {
+    pub id: u16,
+    pub x: f32,
+    pub y: f32,
+    pub ms_left: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -108,6 +154,23 @@ pub enum EventKind {
         victim: u8,
         cause: KillCause,
     },
+    /// Hitscan tracer (Ping Pistol, or a reflected shot), for drawing.
+    Shot {
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+    },
+    Explosion {
+        x: f32,
+        y: f32,
+        radius: f32,
+    },
+    /// Hit by a thrown item.
+    Stun {
+        by: u8,
+        victim: u8,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +179,9 @@ pub enum KillCause {
     Stomp,
     /// Fell into a pit.
     Fall,
+    Weapon(Weapon),
+    /// Own shot sent back by a Checksum Blade.
+    Reflect,
 }
 
 pub fn encode<T: Serialize>(packet: &T) -> Result<Vec<u8>, String> {
@@ -142,6 +208,7 @@ pub fn decode<T: DeserializeOwned>(buf: &[u8]) -> Option<T> {
 mod tests {
     use super::*;
 
+    /// Everything maxed out: the largest snapshot the server can produce.
     fn big_snapshot() -> Snapshot {
         Snapshot {
             tick: 123_456,
@@ -156,16 +223,45 @@ mod tests {
                     y: 200.25,
                     vx: -150.0,
                     vy: 480.0,
-                    flags: 0b1011,
+                    flags: 0b111_1011,
+                    weapon: Some(Weapon::BroadcastShotgun),
+                    ammo: 2,
+                })
+                .collect(),
+            items: (0..10)
+                .map(|id| ItemState {
+                    id,
+                    weapon: Weapon::ForkBomb,
+                    ammo: 1,
+                    x: 100.5,
+                    y: 200.5,
+                    flying: true,
+                })
+                .collect(),
+            projectiles: (0..MAX_PROJECTILES_PER_SNAPSHOT as u16)
+                .map(|id| ProjectileState {
+                    id: id + 300,
+                    kind: ProjectileKind::Pellet,
+                    x: 321.5,
+                    y: 111.25,
+                })
+                .collect(),
+            firewalls: (0..6)
+                .map(|id| FirewallState {
+                    id,
+                    x: 10.0,
+                    y: 20.0,
+                    ms_left: 4000,
                 })
                 .collect(),
             events: (1..=MAX_EVENTS_PER_SNAPSHOT as u32)
                 .map(|id| Event {
-                    id,
-                    kind: EventKind::Kill {
-                        killer: Some(1),
-                        victim: 2,
-                        cause: KillCause::Stomp,
+                    id: id + 70_000,
+                    kind: EventKind::Shot {
+                        x0: 1.5,
+                        y0: 2.5,
+                        x1: 300.5,
+                        y1: 2.5,
                     },
                 })
                 .collect(),
@@ -195,7 +291,12 @@ mod tests {
     #[test]
     fn worst_case_snapshot_fits_one_datagram() {
         let bytes = encode(&ServerPacket::Snapshot(big_snapshot())).unwrap();
-        assert!(bytes.len() < 400, "snapshot is {} bytes", bytes.len());
+        println!("worst-case snapshot: {} bytes", bytes.len());
+        assert!(
+            bytes.len() <= MAX_DATAGRAM,
+            "snapshot is {} bytes",
+            bytes.len()
+        );
     }
 
     #[test]

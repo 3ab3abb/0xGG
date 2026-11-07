@@ -166,7 +166,9 @@ struct InputFrame {
     view_tick: u32,  // server tick the client was *rendering* (for lag compensation)
 }
 // buttons:
-// 0 LEFT  1 RIGHT  2 JUMP  3 DOWN  4 AIM_UP  5 SHOOT  6 PICKUP  7 THROW
+// 0 LEFT  1 RIGHT  2 JUMP  3 DOWN  4 AIM_UP  5 SHOOT  6 INTERACT (pick up, or throw what you hold)
+// Presses (SHOOT/INTERACT edges) are detected on the SERVER's tick from consecutive
+// applied frames, so a press is never lost even if its packet arrived late.
 ```
 
 **Redundancy instead of retransmission:** each `Input` carries the last 3 frames. The server applies any frame with `seq > last_applied_seq` and ignores the rest. A single lost packet costs nothing; three in a row are needed to lose an input.
@@ -187,18 +189,24 @@ struct Snapshot {
     round: u8,
     scores: [(u8 /*slot*/, u8 /*round_wins*/); ≤3],
     players: [PlayerState; ≤3],
-    events: [Event; ≤16],            // reliable events not yet acked by this client (§5.4)
-    // milestone 3 adds: projectiles, items (weapons), firewalls
+    items: [ItemState],              // weapons on the floor or flying after a throw
+    projectiles: [ProjectileState; ≤32],  // pellets, bombs, forked shards
+    firewalls: [FirewallState],
+    events: [Event; ≤20],            // reliable events not yet acked by this client (§5.4)
 }
-struct PlayerState { slot: u8, x: f32, y: f32, vx: f32, vy: f32, flags: u8 /*alive, facing_right, grounded, connected*/ }
-// milestone 3 adds: weapon, ammo
+struct PlayerState { slot: u8, x: f32, y: f32, vx: f32, vy: f32,
+                     flags: u8 /*alive, facing_right, grounded, connected, aiming_up, stunned, swinging*/,
+                     weapon: Option<Weapon>, ammo: u8 }
+struct ItemState { id: u16, weapon: Weapon, ammo: u8, x: f32, y: f32, flying: bool }
+struct ProjectileState { id: u16, kind: Pellet | Bomb | Shard, x: f32, y: f32 }
+struct FirewallState { id: u16, x: f32, y: f32, ms_left: u16 }
 ```
 
 **Snapshots are full state, not deltas.** No snapshot depends on a previous one, so loss never corrupts state. Client rule: **drop any snapshot whose `tick` ≤ latest received tick** (handles reordering and duplicates).
 
-Measured (milestone 2, 3 players): a worst-case snapshot with 16 pending events encodes to **< 400 bytes** (asserted in `udp::tests`).
+**Size budget (asserted in `udp::tests`):** the worst possible snapshot (32 projectiles, 20 tracer events, 10 items, 6 firewalls) encodes to **1028 bytes**, under the 1200-byte cap. A first draft with 48 projectiles / 24 events was 1284 bytes and failed this test, which is why the caps exist. Typical snapshots are 150–300 bytes.
 
-Bandwidth estimate (worst case ~450 B/snapshot once weapons/projectiles are added): 450 B × 30 Hz × 3 clients ≈ **40 KB/s** total downstream from the server. Inputs ≈ 45 B × 60 Hz ≈ 2.7 KB/s per client.
+Bandwidth estimate (typical ~250 B/snapshot): 450 B × 30 Hz × 3 clients ≈ **40 KB/s** total downstream from the server. Inputs ≈ 45 B × 60 Hz ≈ 2.7 KB/s per client.
 
 ### 5.4 Reliable events over UDP
 
@@ -207,14 +215,16 @@ Events that must not be lost but must not wait behind TCP:
 ```rust
 struct Event { id: u32, kind: EventKind }   // id: per-client, monotonically increasing
 enum EventKind {
-    Kill { killer: Option<u8>, victim: u8, cause: KillCause },   // Stomp | Fall (+ weapons in M3)
-    // milestone 3:
-    Pickup { slot: u8, item_id: u16, weapon: u8 },
-    Throw { slot: u8, item_id: u16 },
-    FirewallUp { id: u16, pos: (f32, f32) },
-    FirewallDown { id: u16 },
-    Explosion { pos: (f32, f32), radius: f32 },
+    Kill { killer: Option<u8>, victim: u8, cause: KillCause },  // Stomp | Fall | Weapon(w) | Reflect
+    Shot { x0, y0, x1, y1 },          // hitscan tracer
+    Explosion { x, y, radius },
+    Stun { by: u8, victim: u8 },      // hit by a thrown weapon
 }
+```
+
+Design rule: **anything that is persistent state goes in the snapshot, not in events.** Pickups, throws and firewalls are visible as `items` / `firewalls` / `PlayerState.weapon` in every snapshot, so losing one snapshot loses nothing. Only *instantaneous* things (a kill, a tracer, a blast, a stun) are events, because they'd be invisible if the one snapshot showing them were lost.
+
+```text
 ```
 
 Algorithm (cumulative ACK, like TCP's ACK number):
@@ -262,6 +272,22 @@ Since snapshots go out every 33 ms, an event is effectively retransmitted every 
 - **Winner:** big `0xGG`, `DELIVERED`, `200 OK - last packet standing.`
 - **Losers:** big `0xFF` with a fake fatal error, e.g. `FATAL 0xFF: PACKET_DROPPED / E_TTL_EXCEEDED: time to live reached 0 before delivery`.
 - **Draw (no winner):** `0x00 NULL ROUTE`.
+
+---
+
+## 7c. Weapons (server rules)
+
+| Weapon | Ammo | Behavior |
+|---|---|---|
+| Ping Pistol | 6 | Hitscan ray (2 px steps, 420 px); small knockback |
+| Broadcast Shotgun | 2 | 5 pellets over a 0.45 rad cone, ~140 px range; strong recoil |
+| Fork Bomb | 1 | Bouncing grenade, 1.8 s fuse, r=34; then `fork()`s into 2 shards (r=22). Hurts its owner too |
+| Firewall | 1 | 6×40 px wall for 5 s; blocks rays, pellets and bombs (not players) |
+| Checksum Blade | ∞ | 16-tick swing; first 8 ticks hit and **reflect** rays/pellets back at the shooter; blade vs blade parries |
+
+- INTERACT throws the held weapon (stuns for 0.6 s on hit, no kill) or picks up the nearest item within 18 px.
+- 7 spawners (`W` in the map) restock with a random weapon each round and 8 s after being emptied. Dying drops your weapon.
+- Fairness: within one tick, blade swings resolve **before** shots, so the outcome never depends on slot order.
 
 ---
 
