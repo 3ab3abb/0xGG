@@ -57,14 +57,28 @@ mod tests {
     fn roundtrip_multiple_frames_in_one_buffer() {
         let mut buf = Vec::new();
         write_frame(&mut buf, &ClientMsg::Ping { nonce: 1 }).unwrap();
-        write_frame(&mut buf, &ClientMsg::CreateRoom { name: "port 80".into() }).unwrap();
+        write_frame(
+            &mut buf,
+            &ClientMsg::CreateRoom {
+                name: "port 80".into(),
+            },
+        )
+        .unwrap();
         let mut r = &buf[..];
-        assert_eq!(read_frame::<_, ClientMsg>(&mut r).unwrap(), ClientMsg::Ping { nonce: 1 });
         assert_eq!(
             read_frame::<_, ClientMsg>(&mut r).unwrap(),
-            ClientMsg::CreateRoom { name: "port 80".into() }
+            ClientMsg::Ping { nonce: 1 }
         );
-        assert_eq!(read_frame::<_, ClientMsg>(&mut r).unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(
+            read_frame::<_, ClientMsg>(&mut r).unwrap(),
+            ClientMsg::CreateRoom {
+                name: "port 80".into()
+            }
+        );
+        assert_eq!(
+            read_frame::<_, ClientMsg>(&mut r).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
     }
 
     #[test]
@@ -79,6 +93,9 @@ mod tests {
         let mut buf = Vec::new();
         write_frame(&mut buf, &ClientMsg::JoinRoom { room_id: 3 }).unwrap();
         assert_eq!(&buf[4..], br#"{"type":"JoinRoom","room_id":3}"#);
-        assert_eq!(u32::from_be_bytes(buf[..4].try_into().unwrap()) as usize, buf.len() - 4);
+        assert_eq!(
+            u32::from_be_bytes(buf[..4].try_into().unwrap()) as usize,
+            buf.len() - 4
+        );
     }
 }

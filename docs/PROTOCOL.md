@@ -62,7 +62,8 @@ Client                                   Server
   │──── ListRooms / CreateRoom / JoinRoom ▶│
   │◀─── RoomList / RoomState (pushed) ────│
   │──── SetReady {true} ─────────────────▶│
-  │◀─── MatchStarting {map, slots, ...} ──│   all ready & ≥2 players
+  │◀─── MatchStarting {map, slots, ...} ──│   room full (3) & all ready,
+  │                                        │   or host sends StartMatch (≥2, all ready)
   │                                        │
   │════ UDP Input (60 Hz) ═══════════════▶│
   │◀═══ UDP Snapshot (30 Hz) ═════════════│   rounds play out...
@@ -106,6 +107,7 @@ TCP is a byte stream, not a message stream, so every message is framed:
 | `JoinRoom` | `room_id: u32` | Lobby |
 | `LeaveRoom` | — | InRoom |
 | `SetReady` | `ready: bool` | InRoom |
+| `StartMatch` | — (host only; ≥2 players, all ready) | InRoom |
 | `Chat` | `text: String (1–200)` | Lobby / InRoom / InMatch |
 | `Ping` | `nonce: u64` | any |
 
@@ -185,17 +187,18 @@ struct Snapshot {
     round: u8,
     scores: [(u8 /*slot*/, u8 /*round_wins*/); ≤3],
     players: [PlayerState; ≤3],
-    projectiles: [ProjectileState; ≤32],
-    items: [ItemState; ≤16],         // weapons lying on the map / flying when thrown
-    firewalls: [FirewallState; ≤6],
     events: [Event; ≤16],            // reliable events not yet acked by this client (§5.4)
+    // milestone 3 adds: projectiles, items (weapons), firewalls
 }
-struct PlayerState { slot: u8, pos: (f32, f32), vel: (f32, f32), flags: u8 /*alive, facing, grounded, aiming_up, stunned*/, weapon: u8, ammo: u8 }
+struct PlayerState { slot: u8, x: f32, y: f32, vx: f32, vy: f32, flags: u8 /*alive, facing_right, grounded, connected*/ }
+// milestone 3 adds: weapon, ammo
 ```
 
 **Snapshots are full state, not deltas.** No snapshot depends on a previous one, so loss never corrupts state. Client rule: **drop any snapshot whose `tick` ≤ latest received tick** (handles reordering and duplicates).
 
-Bandwidth estimate (worst case ~450 B/snapshot): 450 B × 30 Hz × 3 clients ≈ **40 KB/s** total downstream from the server. Inputs ≈ 45 B × 60 Hz ≈ 2.7 KB/s per client.
+Measured (milestone 2, 3 players): a worst-case snapshot with 16 pending events encodes to **< 400 bytes** (asserted in `udp::tests`).
+
+Bandwidth estimate (worst case ~450 B/snapshot once weapons/projectiles are added): 450 B × 30 Hz × 3 clients ≈ **40 KB/s** total downstream from the server. Inputs ≈ 45 B × 60 Hz ≈ 2.7 KB/s per client.
 
 ### 5.4 Reliable events over UDP
 
@@ -204,7 +207,8 @@ Events that must not be lost but must not wait behind TCP:
 ```rust
 struct Event { id: u32, kind: EventKind }   // id: per-client, monotonically increasing
 enum EventKind {
-    Kill { killer: Option<u8>, victim: u8, weapon: u8 },
+    Kill { killer: Option<u8>, victim: u8, cause: KillCause },   // Stomp | Fall (+ weapons in M3)
+    // milestone 3:
     Pickup { slot: u8, item_id: u16, weapon: u8 },
     Throw { slot: u8, item_id: u16 },
     FirewallUp { id: u16, pos: (f32, f32) },

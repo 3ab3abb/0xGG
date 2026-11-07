@@ -19,7 +19,10 @@ fn main() -> ExitCode {
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
-        let mut value = || args.next().ok_or_else(|| format!("missing value for {arg}"));
+        let mut value = || {
+            args.next()
+                .ok_or_else(|| format!("missing value for {arg}"))
+        };
         let res = match arg.as_str() {
             "--bind" => value().map(|v| bind = v),
             "--users" => value().map(|v| users_path = v.into()),
@@ -43,9 +46,19 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let udp_port = listener.local_addr().map(|a| a.port()).unwrap_or(DEFAULT_PORT);
+    let udp_port = listener
+        .local_addr()
+        .map(|a| a.port())
+        .unwrap_or(DEFAULT_PORT);
 
-    match gg_server::run(listener, Config { server_name, users_path, udp_port }) {
+    match gg_server::run(
+        listener,
+        Config {
+            server_name,
+            users_path,
+            udp_port,
+        },
+    ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");

@@ -82,10 +82,29 @@ impl Ui {
 
     pub fn button_colored(&mut self, r: Rect, label: &str, color: Color) -> bool {
         let hover = r.contains(self.mouse);
-        draw_rectangle(r.x, r.y, r.w, r.h, if hover { theme::PANEL_HI } else { theme::PANEL });
-        draw_rectangle_lines(r.x, r.y, r.w, r.h, 2.0, if hover { color } else { theme::BORDER });
+        draw_rectangle(
+            r.x,
+            r.y,
+            r.w,
+            r.h,
+            if hover { theme::PANEL_HI } else { theme::PANEL },
+        );
+        draw_rectangle_lines(
+            r.x,
+            r.y,
+            r.w,
+            r.h,
+            2.0,
+            if hover { color } else { theme::BORDER },
+        );
         let size = 22.0;
-        text_centered(label, r.x + r.w / 2.0, r.y + r.h / 2.0 + 7.0, size, if hover { color } else { theme::TEXT });
+        text_centered(
+            label,
+            r.x + r.w / 2.0,
+            r.y + r.h / 2.0 + 7.0,
+            size,
+            if hover { color } else { theme::TEXT },
+        );
         if hover && self.clicked {
             self.hit_widget = true;
             return true;
@@ -132,8 +151,23 @@ impl Ui {
             text(label, r.x, r.y - 7.0, 18.0, theme::DIM);
         }
         draw_rectangle(r.x, r.y, r.w, r.h, theme::PANEL);
-        draw_rectangle_lines(r.x, r.y, r.w, r.h, 2.0, if focused { theme::ACCENT } else { theme::BORDER });
-        let shown = if masked { "*".repeat(value.chars().count()) } else { value.clone() };
+        draw_rectangle_lines(
+            r.x,
+            r.y,
+            r.w,
+            r.h,
+            2.0,
+            if focused {
+                theme::ACCENT
+            } else {
+                theme::BORDER
+            },
+        );
+        let shown = if masked {
+            "*".repeat(value.chars().count())
+        } else {
+            value.clone()
+        };
         let size = 22.0;
         text(&shown, r.x + 10.0, r.y + r.h / 2.0 + 7.0, size, theme::TEXT);
         if focused && (get_time() * 2.0) as i64 % 2 == 0 {

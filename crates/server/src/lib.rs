@@ -2,11 +2,13 @@
 //! tests start the server in-process with the same function.
 
 pub mod conn;
+pub mod game;
 pub mod lobby;
+pub mod udp;
 pub mod users;
 
 use std::io;
-use std::net::TcpListener;
+use std::net::{TcpListener, UdpSocket};
 use std::path::PathBuf;
 use std::thread;
 
@@ -30,16 +32,33 @@ pub struct Config {
 /// Thread layout:
 /// - this thread: `accept()` loop;
 /// - `lobby`: owns all lobby/room state, fed by one channel;
-/// - per connection: one reader + one writer thread (see [`conn`]).
+/// - per connection: one reader + one writer thread (see [`conn`]);
+/// - `udp`: the single UDP socket, routes inputs to game loops (see [`udp`]);
+/// - per running match: one 60 Hz game-loop thread (see [`game`]).
 pub fn run(listener: TcpListener, config: Config) -> io::Result<()> {
     let users = UserStore::load(&config.users_path)?;
-    info!("loaded {} account(s) from {}", users.len(), config.users_path.display());
+    info!(
+        "loaded {} account(s) from {}",
+        users.len(),
+        config.users_path.display()
+    );
+
+    // UDP on the same port number as TCP (separate port spaces).
+    let udp_socket = UdpSocket::bind(listener.local_addr()?)?;
+    let (udp_ctl_tx, udp_ctl_rx) = crossbeam_channel::unbounded();
+    let game_socket = udp_socket.try_clone()?;
+    udp::spawn(udp_socket, udp_ctl_rx)?;
 
     let (lobby_tx, lobby_rx) = crossbeam_channel::unbounded();
-    let lobby = Lobby::new(config, users);
-    thread::Builder::new().name("lobby".into()).spawn(move || lobby.run(lobby_rx))?;
+    let lobby = Lobby::new(config, users, udp_ctl_tx, game_socket, lobby_tx.clone());
+    thread::Builder::new()
+        .name("lobby".into())
+        .spawn(move || lobby.run(lobby_rx))?;
 
-    info!("listening on tcp://{}", listener.local_addr()?);
+    info!(
+        "listening on tcp://{0} and udp://{0}",
+        listener.local_addr()?
+    );
     let mut next_id = 1u64;
     for stream in listener.incoming() {
         match stream {

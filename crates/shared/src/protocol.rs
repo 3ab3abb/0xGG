@@ -8,17 +8,35 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ClientMsg {
-    Register { username: String, password: String },
-    Login { username: String, password: String },
+    Register {
+        username: String,
+        password: String,
+    },
+    Login {
+        username: String,
+        password: String,
+    },
     /// Server cleans up and closes the connection.
     Logout,
     ListRooms,
-    CreateRoom { name: String },
-    JoinRoom { room_id: u32 },
+    CreateRoom {
+        name: String,
+    },
+    JoinRoom {
+        room_id: u32,
+    },
     LeaveRoom,
-    SetReady { ready: bool },
-    Chat { text: String },
-    Ping { nonce: u64 },
+    /// Host only: start with fewer than MAX_ROOM_PLAYERS (everyone must be ready).
+    StartMatch,
+    SetReady {
+        ready: bool,
+    },
+    Chat {
+        text: String,
+    },
+    Ping {
+        nonce: u64,
+    },
 }
 
 impl ClientMsg {
@@ -33,6 +51,7 @@ impl ClientMsg {
             ClientMsg::JoinRoom { .. } => "JoinRoom",
             ClientMsg::LeaveRoom => "LeaveRoom",
             ClientMsg::SetReady { .. } => "SetReady",
+            ClientMsg::StartMatch => "StartMatch",
             ClientMsg::Chat { .. } => "Chat",
             ClientMsg::Ping { .. } => "Ping",
         }
@@ -43,21 +62,60 @@ impl ClientMsg {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerMsg {
-    Welcome { protocol: u8, server_name: String },
-    AuthOk { player_id: u32, username: String, token: u64, udp_port: u16 },
-    AuthError { reason: AuthErrorReason },
+    Welcome {
+        protocol: u8,
+        server_name: String,
+    },
+    AuthOk {
+        player_id: u32,
+        username: String,
+        token: u64,
+        udp_port: u16,
+    },
+    AuthError {
+        reason: AuthErrorReason,
+    },
     /// Pushed to every client in the lobby whenever the room list changes.
-    RoomList { rooms: Vec<RoomInfo> },
+    RoomList {
+        rooms: Vec<RoomInfo>,
+    },
     /// Pushed to every room member whenever the room changes.
-    RoomState { room_id: u32, name: String, host_id: u32, players: Vec<RoomPlayer> },
+    RoomState {
+        room_id: u32,
+        name: String,
+        host_id: u32,
+        players: Vec<RoomPlayer>,
+    },
     /// Confirms `LeaveRoom`; the client is back in the lobby.
     LeftRoom,
-    Chat { from: String, text: String, scope: ChatScope },
-    MatchStarting { map: String, slots: Vec<SlotInfo>, your_slot: u8, countdown_ms: u32 },
-    PlayerDisconnected { slot: u8, username: String, reason: DisconnectReason },
-    MatchEnded { reason: MatchEndReason, winner_slot: Option<u8>, rankings: Vec<Ranking> },
-    Error { code: String, message: String },
-    Pong { nonce: u64 },
+    Chat {
+        from: String,
+        text: String,
+        scope: ChatScope,
+    },
+    MatchStarting {
+        map: String,
+        slots: Vec<SlotInfo>,
+        your_slot: u8,
+        countdown_ms: u32,
+    },
+    PlayerDisconnected {
+        slot: u8,
+        username: String,
+        reason: DisconnectReason,
+    },
+    MatchEnded {
+        reason: MatchEndReason,
+        winner_slot: Option<u8>,
+        rankings: Vec<Ranking>,
+    },
+    Error {
+        code: String,
+        message: String,
+    },
+    Pong {
+        nonce: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

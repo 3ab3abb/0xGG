@@ -44,12 +44,18 @@ impl UserStore {
     pub fn load(path: &Path) -> io::Result<Self> {
         let users = match fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidData, format!("{}: {e}", path.display()))
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}: {e}", path.display()),
+                )
             })?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e),
         };
-        Ok(UserStore { path: path.to_path_buf(), users })
+        Ok(UserStore {
+            path: path.to_path_buf(),
+            users,
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -61,7 +67,9 @@ impl UserStore {
     }
 
     fn find(&self, username: &str) -> Option<&UserRecord> {
-        self.users.iter().find(|u| u.username.eq_ignore_ascii_case(username))
+        self.users
+            .iter()
+            .find(|u| u.username.eq_ignore_ascii_case(username))
     }
 
     pub fn register(&mut self, username: &str, password: &str) -> Result<u32, AuthErrorReason> {

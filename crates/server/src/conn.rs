@@ -16,8 +16,10 @@ use std::thread;
 use crossbeam_channel::Sender;
 use gg_shared::constants::TCP_HEARTBEAT_TIMEOUT;
 use gg_shared::framing::{read_frame, write_frame};
-use gg_shared::protocol::{ClientMsg, DisconnectReason, ServerMsg};
+use gg_shared::protocol::{ClientMsg, DisconnectReason, MatchEndReason, ServerMsg};
 use log::debug;
+
+use crate::game::SlotStats;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ConnId(pub u64);
@@ -28,12 +30,28 @@ impl fmt::Display for ConnId {
     }
 }
 
-/// Everything the lobby thread hears about connections.
+/// Everything the lobby thread hears: from connection threads and game loops.
 #[derive(Debug)]
 pub enum LobbyEvent {
-    Connected { conn: ConnId, addr: SocketAddr, tx: Sender<ServerMsg> },
-    Message { conn: ConnId, msg: ClientMsg },
-    Disconnected { conn: ConnId, reason: DisconnectReason },
+    Connected {
+        conn: ConnId,
+        addr: SocketAddr,
+        tx: Sender<ServerMsg>,
+    },
+    Message {
+        conn: ConnId,
+        msg: ClientMsg,
+    },
+    Disconnected {
+        conn: ConnId,
+        reason: DisconnectReason,
+    },
+    /// A room's game loop ended; final stats for the rankings.
+    MatchFinished {
+        room_id: u32,
+        reason: MatchEndReason,
+        stats: Vec<SlotStats>,
+    },
 }
 
 pub fn spawn(conn: ConnId, stream: TcpStream, lobby: Sender<LobbyEvent>) -> io::Result<()> {
@@ -46,35 +64,46 @@ pub fn spawn(conn: ConnId, stream: TcpStream, lobby: Sender<LobbyEvent>) -> io::
 
     let (out_tx, out_rx) = crossbeam_channel::unbounded::<ServerMsg>();
     // Sent before the reader starts, so the lobby always sees Connected first.
-    if lobby.send(LobbyEvent::Connected { conn, addr, tx: out_tx }).is_err() {
+    if lobby
+        .send(LobbyEvent::Connected {
+            conn,
+            addr,
+            tx: out_tx,
+        })
+        .is_err()
+    {
         return Ok(()); // lobby is gone: server shutting down
     }
 
-    thread::Builder::new().name(format!("{conn}-w")).spawn(move || {
-        for msg in out_rx.iter() {
-            if let Err(e) = write_frame(&mut writer, &msg) {
-                debug!("{conn}: write failed: {e}");
-                break;
-            }
-        }
-        let _ = writer.shutdown(Shutdown::Both);
-    })?;
-
-    thread::Builder::new().name(format!("{conn}-r")).spawn(move || loop {
-        match read_frame::<_, ClientMsg>(&mut reader) {
-            Ok(msg) => {
-                if lobby.send(LobbyEvent::Message { conn, msg }).is_err() {
+    thread::Builder::new()
+        .name(format!("{conn}-w"))
+        .spawn(move || {
+            for msg in out_rx.iter() {
+                if let Err(e) = write_frame(&mut writer, &msg) {
+                    debug!("{conn}: write failed: {e}");
                     break;
                 }
             }
-            Err(e) => {
-                let reason = classify(&e);
-                debug!("{conn}: read ended ({reason:?}): {e}");
-                let _ = lobby.send(LobbyEvent::Disconnected { conn, reason });
-                break;
+            let _ = writer.shutdown(Shutdown::Both);
+        })?;
+
+    thread::Builder::new()
+        .name(format!("{conn}-r"))
+        .spawn(move || loop {
+            match read_frame::<_, ClientMsg>(&mut reader) {
+                Ok(msg) => {
+                    if lobby.send(LobbyEvent::Message { conn, msg }).is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let reason = classify(&e);
+                    debug!("{conn}: read ended ({reason:?}): {e}");
+                    let _ = lobby.send(LobbyEvent::Disconnected { conn, reason });
+                    break;
+                }
             }
-        }
-    })?;
+        })?;
     Ok(())
 }
 
