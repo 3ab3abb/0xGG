@@ -1,7 +1,9 @@
 //! In-game bots: spawned by the server, connected over real localhost sockets.
 
+mod common;
+
 use std::io::BufReader;
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -10,7 +12,7 @@ use gg_shared::framing::{read_frame, write_frame};
 use gg_shared::protocol::*;
 
 fn start_server() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = common::listener_with_free_udp();
     let addr = listener.local_addr().unwrap();
     let users_path = std::env::temp_dir().join(format!(
         "gg-bot-test-{}-{}.json",

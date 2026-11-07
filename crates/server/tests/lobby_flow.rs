@@ -1,7 +1,9 @@
 //! End-to-end lobby tests over real TCP sockets on localhost.
 
+mod common;
+
 use std::io::BufReader;
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
@@ -11,7 +13,7 @@ use gg_shared::framing::{read_frame, write_frame};
 use gg_shared::protocol::*;
 
 fn start_server() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = common::listener_with_free_udp();
     let addr = listener.local_addr().unwrap();
     let users_path: PathBuf = std::env::temp_dir().join(format!(
         "gg-test-users-{}-{}.json",
@@ -124,16 +126,28 @@ fn register_login_and_auth_errors() {
     );
 
     // After alice disconnects, the account can log in again.
+    // The server learns about the disconnect asynchronously (reader thread
+    // → lobby), so retry instead of assuming it happens within N ms.
     drop(alice);
-    thread::sleep(Duration::from_millis(200));
-    c.send(ClientMsg::Login {
-        username: "alice".into(),
-        password: "hunter2".into(),
-    });
-    assert!(
-        matches!(c.expect(|m| matches!(m, ServerMsg::AuthOk { .. } | ServerMsg::AuthError { .. })),
-        ServerMsg::AuthOk { ref username, .. } if username == "alice")
-    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        c.send(ClientMsg::Login {
+            username: "alice".into(),
+            password: "hunter2".into(),
+        });
+        match c.expect(|m| matches!(m, ServerMsg::AuthOk { .. } | ServerMsg::AuthError { .. })) {
+            ServerMsg::AuthOk { username, .. } => {
+                assert_eq!(username, "alice");
+                break;
+            }
+            ServerMsg::AuthError {
+                reason: AuthErrorReason::AlreadyLoggedIn,
+            } if std::time::Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            other => panic!("re-login failed: {other:?}"),
+        }
+    }
 
     // Commands that need a login are rejected before it.
     let mut anon = TestClient::connect(addr);

@@ -1,8 +1,10 @@
 //! End-to-end UDP tests: Hello/Ack binding, inputs → authoritative movement
 //! in snapshots, unknown tokens ignored.
 
+mod common;
+
 use std::io::BufReader;
-use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -13,7 +15,7 @@ use gg_shared::protocol::*;
 use gg_shared::udp::{self, ClientPacket, InputFrame, RoundPhase, ServerPacket, Snapshot};
 
 fn start_server() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = common::listener_with_free_udp();
     let addr = listener.local_addr().unwrap();
     let users_path = std::env::temp_dir().join(format!(
         "gg-udp-test-{}-{}.json",
