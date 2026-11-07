@@ -22,6 +22,8 @@ struct UserRecord {
 pub struct UserStore {
     path: PathBuf,
     users: Vec<UserRecord>,
+    /// In-memory bot accounts: never written to disk.
+    bots: Vec<UserRecord>,
 }
 
 fn to_hex(bytes: &[u8]) -> String {
@@ -38,6 +40,7 @@ fn hash_password(salt: &str, password: &str) -> String {
 pub fn valid_username(name: &str) -> bool {
     (USERNAME_MIN..=USERNAME_MAX).contains(&name.chars().count())
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !gg_shared::bot::is_bot_name(name) // reserved for server-spawned bots
 }
 
 impl UserStore {
@@ -55,6 +58,7 @@ impl UserStore {
         Ok(UserStore {
             path: path.to_path_buf(),
             users,
+            bots: Vec::new(),
         })
     }
 
@@ -69,6 +73,7 @@ impl UserStore {
     fn find(&self, username: &str) -> Option<&UserRecord> {
         self.users
             .iter()
+            .chain(&self.bots)
             .find(|u| u.username.eq_ignore_ascii_case(username))
     }
 
@@ -83,7 +88,7 @@ impl UserStore {
             return Err(AuthErrorReason::UserExists);
         }
         let salt = to_hex(&rand::random::<[u8; 16]>());
-        let id = self.users.iter().map(|u| u.id).max().unwrap_or(0) + 1;
+        let id = self.next_id();
         self.users.push(UserRecord {
             id,
             username: username.to_string(),
@@ -105,6 +110,30 @@ impl UserStore {
     }
 
     /// Write to a temp file then rename, so a crash never leaves a half-written file.
+    fn next_id(&self) -> u32 {
+        self.users
+            .iter()
+            .chain(&self.bots)
+            .map(|u| u.id)
+            .max()
+            .unwrap_or(0)
+            + 1
+    }
+
+    /// Create an in-memory account for a server-spawned bot. Bot names use
+    /// the reserved prefix, so they can't collide with human accounts.
+    pub fn add_bot(&mut self, username: &str, password: &str) -> u32 {
+        let salt = to_hex(&rand::random::<[u8; 16]>());
+        let id = self.next_id();
+        self.bots.push(UserRecord {
+            id,
+            username: username.to_string(),
+            password_hash: hash_password(&salt, password),
+            salt,
+        });
+        id
+    }
+
     fn save(&self) -> io::Result<()> {
         let tmp = self.path.with_extension("json.tmp");
         fs::write(&tmp, serde_json::to_vec_pretty(&self.users)?)?;

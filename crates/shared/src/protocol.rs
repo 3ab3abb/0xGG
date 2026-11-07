@@ -28,6 +28,10 @@ pub enum ClientMsg {
     LeaveRoom,
     /// Host only: start with fewer than MAX_ROOM_PLAYERS (everyone must be ready).
     StartMatch,
+    /// Host only: the server spawns a bot client that joins this room.
+    AddBot,
+    /// Host only: disconnect one bot from this room.
+    RemoveBot,
     SetReady {
         ready: bool,
     },
@@ -52,6 +56,8 @@ impl ClientMsg {
             ClientMsg::LeaveRoom => "LeaveRoom",
             ClientMsg::SetReady { .. } => "SetReady",
             ClientMsg::StartMatch => "StartMatch",
+            ClientMsg::AddBot => "AddBot",
+            ClientMsg::RemoveBot => "RemoveBot",
             ClientMsg::Chat { .. } => "Chat",
             ClientMsg::Ping { .. } => "Ping",
         }
@@ -134,7 +140,9 @@ impl AuthErrorReason {
             AuthErrorReason::BadCredentials => "wrong username or password",
             AuthErrorReason::UserExists => "username already taken",
             AuthErrorReason::AlreadyLoggedIn => "this account is already logged in",
-            AuthErrorReason::InvalidUsername => "username must be 3-16 chars: letters, digits, _",
+            AuthErrorReason::InvalidUsername => {
+                "username must be 3-16 chars (letters, digits, _), not starting with bot_"
+            }
             AuthErrorReason::InvalidPassword => "password must be 3-64 chars",
         }
     }
@@ -154,6 +162,7 @@ pub struct RoomPlayer {
     pub player_id: u32,
     pub username: String,
     pub ready: bool,
+    pub is_bot: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

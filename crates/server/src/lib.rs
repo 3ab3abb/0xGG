@@ -1,6 +1,7 @@
 //! 0xGG server library. `main.rs` is a thin CLI around [`run`]; integration
 //! tests start the server in-process with the same function.
 
+pub mod bot;
 pub mod conn;
 pub mod game;
 pub mod lobby;
@@ -49,8 +50,25 @@ pub fn run(listener: TcpListener, config: Config) -> io::Result<()> {
     let game_socket = udp_socket.try_clone()?;
     udp::spawn(udp_socket, udp_ctl_rx)?;
 
+    // Bots connect back to this server over localhost (or the bound IP).
+    let mut bot_addr = listener.local_addr()?;
+    if bot_addr.ip().is_unspecified() {
+        bot_addr.set_ip(if bot_addr.is_ipv4() {
+            std::net::Ipv4Addr::LOCALHOST.into()
+        } else {
+            std::net::Ipv6Addr::LOCALHOST.into()
+        });
+    }
+
     let (lobby_tx, lobby_rx) = crossbeam_channel::unbounded();
-    let lobby = Lobby::new(config, users, udp_ctl_tx, game_socket, lobby_tx.clone());
+    let lobby = Lobby::new(
+        config,
+        users,
+        udp_ctl_tx,
+        game_socket,
+        lobby_tx.clone(),
+        bot_addr,
+    );
     thread::Builder::new()
         .name("lobby".into())
         .spawn(move || lobby.run(lobby_rx))?;

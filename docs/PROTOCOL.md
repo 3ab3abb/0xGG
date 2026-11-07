@@ -108,6 +108,8 @@ TCP is a byte stream, not a message stream, so every message is framed:
 | `LeaveRoom` | — | InRoom |
 | `SetReady` | `ready: bool` | InRoom |
 | `StartMatch` | — (host only; ≥2 players, all ready) | InRoom |
+| `AddBot` | — (host only, room not full, no match) | InRoom |
+| `RemoveBot` | — (host only; disconnects the newest bot) | InRoom |
 | `Chat` | `text: String (1–200)` | Lobby / InRoom / InMatch |
 | `Ping` | `nonce: u64` | any |
 
@@ -119,7 +121,7 @@ TCP is a byte stream, not a message stream, so every message is framed:
 | `AuthOk` | `player_id: u32`, `username`, `token: u64`, `udp_port: u16` | `token` is random, used to authenticate UDP. |
 | `AuthError` | `reason` | `bad_credentials`, `user_exists`, `already_logged_in`, `invalid_username` |
 | `RoomList` | `rooms: [{id, name, players, max, in_match}]` | **Pushed** to all lobby clients whenever it changes. |
-| `RoomState` | `room_id, name, host_id, players: [{player_id, username, ready}]` | **Pushed** to room members on any change. |
+| `RoomState` | `room_id, name, host_id, players: [{player_id, username, ready, is_bot}]` | **Pushed** to room members on any change. |
 | `LeftRoom` | — | Confirms `LeaveRoom`; client is back in the lobby (a `RoomList` follows). |
 | `Chat` | `from: String`, `text`, `scope: "lobby" \| "room"` | |
 | `MatchStarting` | `map: String`, `slots: [{slot: u8, player_id, username}]`, `your_slot: u8`, `countdown_ms: u32` | `slot` is the in-match hex id `0x01..0x03`; color derives from slot (orange / blue / white). |
@@ -288,6 +290,16 @@ Since snapshots go out every 33 ms, an event is effectively retransmitted every 
 - INTERACT throws the held weapon (stuns for 0.6 s on hit, no kill) or picks up the nearest item within 18 px.
 - 7 spawners (`W` in the map) restock with a random weapon each round and 8 s after being emptied. Dying drops your weapon.
 - Fairness: within one tick, blade swings resolve **before** shots, so the outcome never depends on slot order.
+
+---
+
+## 7d. Bots
+
+`AddBot` makes the server spawn a **headless client thread inside the server process** that connects back to the server over **real TCP + UDP sockets on localhost** and speaks this exact protocol (Login → Hello → JoinRoom → SetReady → 60 Hz Input). The networking code has no bot-specific path; the only server-side knowledge is the `is_bot` flag for display.
+
+- Bot accounts are in-memory only (never written to `users.json`); the `bot_` name prefix is reserved, so humans can't register it.
+- Bots re-ready after each match (rematch) and disconnect as soon as no human is left in their room.
+- The brain (`gg_shared::bot`) reads only the snapshot every client receives: no extra information.
 
 ---
 

@@ -116,6 +116,10 @@ pub struct Auto {
     pub join: bool,
     /// Play with random inputs (`--bot`), for automated playtests.
     pub bot: bool,
+    /// Create a room and fill it with N server bots (`--add-bots N`).
+    pub add_bots: u8,
+    bots_sent: bool,
+    start_sent: bool,
     lobby_since: Option<f64>,
     join_sent: bool,
     ready_sent: bool,
@@ -465,6 +469,27 @@ impl App {
                     }
                 }
             }
+            Screen::Room if self.auto.add_bots > 0 && !self.auto.bots_sent => {
+                self.auto.bots_sent = true;
+                for _ in 0..self.auto.add_bots {
+                    self.send(ClientMsg::AddBot);
+                }
+            }
+            Screen::Room
+                if self.auto.bots_sent
+                    && !self.auto.start_sent
+                    && self.room.as_ref().is_some_and(|r| {
+                        // Wait until every requested bot has joined.
+                        r.players.iter().filter(|p| p.is_bot).count() >= self.auto.add_bots as usize
+                            && r.players.len() >= MIN_PLAYERS_TO_START
+                            && r.players.len() < MAX_ROOM_PLAYERS
+                            && r.players.iter().all(|p| p.ready)
+                    }) =>
+            {
+                // 2/3 with everyone ready: host starts (3/3 auto-starts).
+                self.auto.start_sent = true;
+                self.send(ClientMsg::StartMatch);
+            }
             Screen::Room if !self.auto.ready_sent => {
                 self.auto.ready_sent = true;
                 self.send(ClientMsg::SetReady { ready: true });
@@ -732,6 +757,9 @@ impl App {
             if p.player_id == room.host_id {
                 name.push_str("  [host]");
             }
+            if p.is_bot {
+                name.push_str("  [bot]");
+            }
             if p.player_id == my_id {
                 name.push_str("  (you)");
                 my_ready = p.ready;
@@ -746,7 +774,9 @@ impl App {
         }
 
         let n = room.players.len();
-        let can_start = room.host_id == my_id
+        let i_am_host = room.host_id == my_id;
+        let has_bot = room.players.iter().any(|p| p.is_bot);
+        let can_start = i_am_host
             && (MIN_PLAYERS_TO_START..MAX_ROOM_PLAYERS).contains(&n)
             && room.players.iter().all(|p| p.ready);
         let by = left.y + left.h - 60.0;
@@ -763,6 +793,26 @@ impl App {
             theme::ERROR,
         ) {
             self.send(ClientMsg::LeaveRoom);
+        }
+        // Host-only bot controls, one row above the main buttons.
+        if i_am_host {
+            let bot_y = by - 58.0;
+            if n < MAX_ROOM_PLAYERS
+                && self
+                    .ui
+                    .button(Rect::new(left.x + 12.0, bot_y, 200.0, 46.0), "+ ADD BOT")
+            {
+                self.send(ClientMsg::AddBot);
+            }
+            if has_bot
+                && self.ui.button_colored(
+                    Rect::new(left.x + 224.0, bot_y, 220.0, 46.0),
+                    "- REMOVE BOT",
+                    theme::WARN,
+                )
+            {
+                self.send(ClientMsg::RemoveBot);
+            }
         }
         if can_start {
             let label = format!("START ({n}/{MAX_ROOM_PLAYERS})");

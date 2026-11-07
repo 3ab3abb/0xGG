@@ -6,6 +6,7 @@
 
 use std::collections::VecDeque;
 
+use gg_shared::bot::BotBrain;
 use gg_shared::game::{buttons, Map, Tile, DT, PLAYER_H, PLAYER_W, SNAPSHOT_EVERY, TILE};
 use gg_shared::protocol::SlotInfo;
 use gg_shared::udp::{
@@ -48,19 +49,7 @@ pub struct GameView {
     snaps_expected: u64,
     snaps_stale: u64,
     rate_window: VecDeque<f64>,
-    bot: BotState,
-}
-
-/// Memory for the `--bot` player (dev/testing only).
-#[derive(Default)]
-struct BotState {
-    /// Toggles every frame so SHOOT/INTERACT produce fresh presses.
-    flip: bool,
-    jump_hold: u8,
-    last_x: f32,
-    stuck_frames: u32,
-    wander_until: f64,
-    wander_dir: u16,
+    brain: BotBrain,
 }
 
 fn read_buttons() -> u16 {
@@ -160,7 +149,7 @@ impl GameView {
             snaps_expected: 0,
             snaps_stale: 0,
             rate_window: VecDeque::new(),
-            bot: BotState::default(),
+            brain: BotBrain::new(macroquad::rand::rand() as u64 ^ ((get_time() * 1e9) as u64)),
         }
     }
 
@@ -255,137 +244,18 @@ impl GameView {
         }
     }
 
-    /// Simple sparring bot (`--bot`): grabs the nearest weapon, chases the
-    /// nearest opponent, lines up and fires. Reads only the snapshot, exactly
-    /// like a human player would; the server can't tell the difference.
-    fn bot(&mut self) -> u16 {
-        use buttons::*;
-        use macroquad::rand::gen_range;
-        let now = get_time();
-        let Some(s) = &self.latest else { return 0 };
-        let alive = |p: &&PlayerState| p.flags & flags::ALIVE != 0;
-        let Some(me) = s
-            .players
-            .iter()
-            .filter(alive)
-            .find(|p| p.slot == self.your_slot)
-        else {
-            return 0;
-        };
-        let bot = &mut self.bot;
-        bot.flip = !bot.flip;
-        let (mx, my) = (me.x + PLAYER_W / 2.0, me.y + PLAYER_H / 2.0);
-        let grounded = me.flags & flags::GROUNDED != 0;
-        let mut b = 0u16;
-        let mut want_jump = false;
-        let mut want_drop = false;
-
-        let needs_weapon = match me.weapon {
-            None => true,
-            Some(w) => w.max_ammo() > 0 && me.ammo == 0,
-        };
-        let target: Option<(f32, f32)> = if needs_weapon {
-            let it = s.items.iter().filter(|it| !it.flying).min_by(|a, c| {
-                let da = (a.x - mx).abs() + (a.y - my).abs();
-                let dc = (c.x - mx).abs() + (c.y - my).abs();
-                da.total_cmp(&dc)
-            });
-            if let Some(it) = it {
-                let (ix, iy) = (it.x + ITEM_W / 2.0, it.y + ITEM_H / 2.0);
-                if (ix - mx).abs() < 12.0 && (iy - my).abs() < 14.0 && bot.flip {
-                    b |= INTERACT; // throws an empty gun first, then picks up
-                }
-                Some((ix, iy))
-            } else {
-                None
-            }
-        } else {
-            let foe = s
-                .players
-                .iter()
-                .filter(alive)
-                .filter(|p| p.slot != self.your_slot)
-                .min_by(|a, c| {
-                    let da = (a.x - me.x).abs() + (a.y - me.y).abs();
-                    let dc = (c.x - me.x).abs() + (c.y - me.y).abs();
-                    da.total_cmp(&dc)
-                });
-            if let (Some(foe), Some(w)) = (foe, me.weapon) {
-                let (dx, dy) = (foe.x - me.x, foe.y - me.y);
-                let range = match w {
-                    Weapon::PingPistol => 300.0,
-                    Weapon::BroadcastShotgun => 110.0,
-                    Weapon::ForkBomb => 140.0,
-                    Weapon::Firewall => 90.0,
-                    Weapon::ChecksumBlade => 26.0,
-                };
-                let facing_ok = (dx > 0.0) == (me.flags & flags::FACING_RIGHT != 0);
-                if dy.abs() < 10.0 && dx.abs() < range && facing_ok && bot.flip {
-                    b |= SHOOT;
-                } else if dx.abs() < 10.0 && dy < -20.0 && dy > -range && bot.flip {
-                    b |= AIM_UP | SHOOT;
-                }
-                Some((foe.x + PLAYER_W / 2.0, foe.y + PLAYER_H / 2.0))
-            } else {
-                None
-            }
-        };
-
-        // Wander now and then so bots don't deadlock under a platform.
-        if now < bot.wander_until {
-            b |= bot.wander_dir;
-            if grounded && gen_range(0, 20) == 0 {
-                want_jump = true;
-            }
-        } else if let Some((tx, ty)) = target {
-            if (tx - mx).abs() > 6.0 {
-                b |= if tx > mx { RIGHT } else { LEFT };
-            } else if b & SHOOT == 0 {
-                // Close horizontally: turn to face the target without walking off.
-                let face_right = me.flags & flags::FACING_RIGHT != 0;
-                if (tx > mx) != face_right && (tx - mx).abs() > 1.0 {
-                    b |= if tx > mx { RIGHT } else { LEFT };
-                }
-            }
-            if ty < my - 20.0 {
-                want_jump = true;
-            } else if ty > my + 24.0 && (tx - mx).abs() < 60.0 {
-                want_drop = true;
-            }
-        }
-
-        // Stuck against a wall: jump, and if that fails, wander off.
-        if b & (LEFT | RIGHT) != 0 && (me.x - bot.last_x).abs() < 0.2 {
-            bot.stuck_frames += 1;
-            want_jump = true;
-            if bot.stuck_frames > 45 {
-                bot.stuck_frames = 0;
-                bot.wander_until = now + gen_range(0.6, 1.4);
-                bot.wander_dir = if gen_range(0, 2) == 0 { LEFT } else { RIGHT };
-            }
-        } else {
-            bot.stuck_frames = 0;
-        }
-        bot.last_x = me.x;
-
-        if bot.jump_hold > 0 {
-            bot.jump_hold -= 1;
-            b |= JUMP;
-        } else if grounded && want_drop {
-            b |= DOWN | JUMP;
-            bot.jump_hold = 2;
-        } else if grounded && want_jump {
-            bot.jump_hold = 14; // hold for a full-height jump
-            b |= JUMP;
-        }
-        b
-    }
-
     /// Advance the fixed 60 Hz input clock; returns the Input packets to send.
     pub fn update(&mut self, token: u64, bot: bool) -> Vec<ClientPacket> {
         // Clamp so a long frame (window drag) doesn't burst-send hundreds of inputs.
         self.acc = (self.acc + get_frame_time()).min(0.25);
-        let b = if bot { self.bot() } else { read_buttons() };
+        let b = if bot {
+            let slot = self.your_slot;
+            self.latest
+                .as_ref()
+                .map_or(0, |s| self.brain.think(s, slot, get_time()))
+        } else {
+            read_buttons()
+        };
         let view_tick = self.latest.as_ref().map_or(0, |s| s.tick);
         let mut out = Vec::new();
         while self.acc >= DT {

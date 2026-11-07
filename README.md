@@ -52,6 +52,12 @@ One hit drops a packet. Grab weapons from the blue spawner pads: **Ping Pistol**
 
 The footer shows TCP and UDP round-trip times; in a match the bottom-left shows snapshot rate, measured loss and how many inputs are still unacknowledged.
 
+### Bots
+
+Alone? In a port, the host can press **+ ADD BOT** (up to 2) and **− REMOVE BOT**. Bots are real network clients the server spawns on localhost: they log in, do the UDP handshake and play through the same protocol as you. They rematch after each match and leave when the last human does.
+
+One-command solo practice: `cargo run --release -p gg-client -- --login you:pw123 --add-bots 2`
+
 ### Demo / test flags (client)
 
 | Flag | Effect |
@@ -59,7 +65,8 @@ The footer shows TCP and UDP round-trip times; in a match the bottom-left shows 
 | `--loss 20` | Drop 20% of UDP packets in each direction (shows the game survives loss) |
 | `--login name:pass` | Register or log in automatically |
 | `--autojoin` | Join the first open port (or create one) and ready up |
-| `--bot` | Sparring bot: grabs weapons, chases the nearest packet, lines up and fires |
+| `--bot` | This client plays itself with the bot brain |
+| `--add-bots N` | Create a port, add N (1-2) server bots and start |
 
 Quick local 3-player session (one terminal each, a few seconds apart):
 

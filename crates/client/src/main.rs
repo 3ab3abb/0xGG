@@ -1,12 +1,13 @@
 //! 0xGG client.
 //!
 //! usage: gg-client [--server HOST[:PORT]] [--user NAME] [--loss PERCENT]
-//!                  [--login NAME:PASS] [--autojoin] [--bot]
+//!                  [--login NAME:PASS] [--autojoin] [--bot] [--add-bots N]
 //!
 //! `--loss 20` drops 20% of UDP packets in each direction (demo of loss tolerance).
 //! `--login` registers-or-logs-in automatically; `--autojoin` joins the first
 //! open room (or creates one) and readies up. Handy for local 3-client tests.
-//! `--bot` plays with random inputs (automated playtests).
+//! `--bot` plays as the sparring bot. `--add-bots N` (1-2) creates a port,
+//! asks the server for N bots and starts: one-command solo practice.
 //! `GG_SCREENSHOT=out.png:SECONDS` saves the window to a PNG after SECONDS and exits.
 
 mod app;
@@ -55,6 +56,10 @@ async fn main() {
             }
             "--autojoin" => auto.join = true,
             "--bot" => auto.bot = true,
+            "--add-bots" => {
+                auto.add_bots = args.next().and_then(|v| v.parse().ok()).unwrap_or(2).min(2);
+                auto.join = true;
+            }
             _ => eprintln!("ignoring unknown argument {arg}"),
         }
     }

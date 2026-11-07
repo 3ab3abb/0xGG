@@ -5,7 +5,7 @@
 //! arrival order. Simultaneous actions (two players joining the last free
 //! slot at once) are therefore serialized naturally — first event wins.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{SocketAddr, UdpSocket};
 
 use crossbeam_channel::{Receiver, Sender};
@@ -74,6 +74,11 @@ pub struct Lobby {
     udp_socket: UdpSocket,
     /// Handed to game loops so they can report back.
     self_tx: Sender<LobbyEvent>,
+    /// Where server-spawned bots connect (this server, via localhost).
+    bot_addr: SocketAddr,
+    /// Player ids of bot accounts.
+    bot_ids: HashSet<u32>,
+    bots_spawned: u32,
 }
 
 /// Free function (not a method) so it can be called while another field of
@@ -100,6 +105,7 @@ impl Lobby {
         udp_ctl: Sender<UdpCtl>,
         udp_socket: UdpSocket,
         self_tx: Sender<LobbyEvent>,
+        bot_addr: SocketAddr,
     ) -> Self {
         Lobby {
             config,
@@ -110,6 +116,9 @@ impl Lobby {
             udp_ctl,
             udp_socket,
             self_tx,
+            bot_addr,
+            bot_ids: HashSet::new(),
+            bots_spawned: 0,
         }
     }
 
@@ -194,6 +203,8 @@ impl Lobby {
             }
             ClientMsg::SetReady { ready } if in_room => self.set_ready(conn, ready),
             ClientMsg::StartMatch if in_room => self.host_start(conn),
+            ClientMsg::AddBot if in_room => self.add_bot(conn),
+            ClientMsg::RemoveBot if in_room => self.remove_bot(conn),
             ClientMsg::Chat { text } if authed => self.chat(conn, text),
             other => send(
                 &self.sessions,
@@ -329,6 +340,7 @@ impl Lobby {
                     player_id: u.player_id,
                     username: u.username.clone(),
                     ready: m.ready,
+                    is_bot: self.bot_ids.contains(&u.player_id),
                 })
             })
             .collect();
@@ -478,6 +490,63 @@ impl Lobby {
         self.push_room_state(room_id);
         if start {
             self.start_match(room_id);
+        }
+    }
+
+    /// Checks shared by host-only room commands. Returns the room id.
+    fn host_room(&self, conn: ConnId, what: &str) -> Result<u32, ServerMsg> {
+        let room_id = self.sessions.get(&conn).and_then(|s| s.room);
+        let room = room_id.and_then(|id| self.rooms.get(&id));
+        match room {
+            None => Err(error("bad_state", "not in a room")),
+            Some(r) if r.host != conn => {
+                Err(error("not_host", format!("only the host can {what}")))
+            }
+            Some(r) if r.game.is_some() => Err(error("room_in_match", "a match is running")),
+            Some(r) => Ok(r.id),
+        }
+    }
+
+    /// Spawn a headless bot client that connects back over localhost and
+    /// joins this room like any other player.
+    fn add_bot(&mut self, conn: ConnId) {
+        let room_id = match self.host_room(conn, "add bots") {
+            Ok(id) => id,
+            Err(e) => return send(&self.sessions, conn, e),
+        };
+        if self.rooms[&room_id].members.len() >= MAX_ROOM_PLAYERS {
+            return send(&self.sessions, conn, error("room_full", "the port is full"));
+        }
+        self.bots_spawned += 1;
+        let username = format!("{}{}", gg_shared::bot::BOT_PREFIX, self.bots_spawned);
+        let password = format!("{:032x}", rand::random::<u128>());
+        let id = self.users.add_bot(&username, &password);
+        self.bot_ids.insert(id);
+        info!("{}: added {username} to room {room_id}", self.label(conn));
+        if let Err(e) = crate::bot::spawn(self.bot_addr, username, password, room_id) {
+            warn!("could not start bot: {e}");
+        }
+    }
+
+    /// Disconnect the most recently added bot in this room.
+    fn remove_bot(&mut self, conn: ConnId) {
+        let room_id = match self.host_room(conn, "remove bots") {
+            Ok(id) => id,
+            Err(e) => return send(&self.sessions, conn, e),
+        };
+        let bot_conn = self.rooms[&room_id]
+            .members
+            .iter()
+            .rev()
+            .map(|m| m.conn)
+            .find(|c| {
+                self.player_id(*c)
+                    .is_some_and(|id| self.bot_ids.contains(&id))
+            });
+        match bot_conn {
+            // Dropping its session closes the bot's socket; its thread exits.
+            Some(b) => self.disconnect(b, DisconnectReason::Left),
+            None => send(&self.sessions, conn, error("no_bot", "no bot in this port")),
         }
     }
 
