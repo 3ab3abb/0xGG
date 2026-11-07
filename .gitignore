@@ -1,0 +1,14 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Server runtime data
+users.json
+
+# Course material (not ours to publish)
+*.pdf
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
