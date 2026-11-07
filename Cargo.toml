@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["crates/shared", "crates/server", "crates/client"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+# Optimize dependencies even in debug builds (keeps macroquad smooth while we iterate).
+[profile.dev.package."*"]
+opt-level = 2

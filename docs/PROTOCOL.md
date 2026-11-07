@@ -100,7 +100,7 @@ TCP is a byte stream, not a message stream, so every message is framed:
 |---|---|---|
 | `Register` | `username: String (3–16, [A-Za-z0-9_])`, `password: String` | Connected |
 | `Login` | `username`, `password` | Connected |
-| `Logout` | — | any authenticated |
+| `Logout` | — (server cleans up and closes the connection) | any authenticated |
 | `ListRooms` | — | Lobby |
 | `CreateRoom` | `name: String (1–24)` | Lobby |
 | `JoinRoom` | `room_id: u32` | Lobby |
@@ -117,11 +117,12 @@ TCP is a byte stream, not a message stream, so every message is framed:
 | `AuthOk` | `player_id: u32`, `username`, `token: u64`, `udp_port: u16` | `token` is random, used to authenticate UDP. |
 | `AuthError` | `reason` | `bad_credentials`, `user_exists`, `already_logged_in`, `invalid_username` |
 | `RoomList` | `rooms: [{id, name, players, max, in_match}]` | **Pushed** to all lobby clients whenever it changes. |
-| `RoomState` | `room_id, name, host_id, players: [{player_id, username, ready, slot}]` | **Pushed** to room members on any change. |
+| `RoomState` | `room_id, name, host_id, players: [{player_id, username, ready}]` | **Pushed** to room members on any change. |
+| `LeftRoom` | — | Confirms `LeaveRoom`; client is back in the lobby (a `RoomList` follows). |
 | `Chat` | `from: String`, `text`, `scope: "lobby" \| "room"` | |
-| `MatchStarting` | `map: String`, `slots: [{slot: u8, player_id, username, color}]`, `your_slot: u8`, `countdown_ms: u32` | `slot` is the in-match hex id `0x01..0x03`. |
-| `PlayerDisconnected` | `slot: u8`, `username`, `reason: "timeout" \| "closed"` | Broadcast to the room. |
-| `MatchEnded` | `reason: "normal" \| "not_enough_players"`, `winner_slot: Option<u8>`, `rankings: [{slot, username, round_wins, kills, deaths}]` | Sorted by rank. |
+| `MatchStarting` | `map: String`, `slots: [{slot: u8, player_id, username}]`, `your_slot: u8`, `countdown_ms: u32` | `slot` is the in-match hex id `0x01..0x03`; color derives from slot (orange / blue / white). |
+| `PlayerDisconnected` | `slot: u8`, `username`, `reason: "closed" \| "timeout" \| "error" \| "left"` | Broadcast to the room. |
+| `MatchEnded` | `reason: "normal" \| "not_enough_players"`, `winner_slot: Option<u8>`, `rankings: [{slot, username, round_wins, kills, deaths, disconnected}]` | Sorted by rank, winner first. |
 | `Error` | `code`, `message` | Non-fatal. |
 | `Pong` | `nonce: u64` | |
 
@@ -249,6 +250,14 @@ Since snapshots go out every 33 ms, an event is effectively retransmitted every 
 - Round: 3 s `Countdown` → `Playing` → last packet alive ⇒ `RoundOver{winner}` (2 s) → next round. If everyone dies the same tick: draw, nobody scores.
 - Scores, ranks and winner are **computed only on the server**; clients display what `Snapshot.scores` and `MatchEnded.rankings` say.
 - Physics code lives in the `shared` crate so client prediction runs the **identical** simulation the server runs.
+
+---
+
+## 7b. End-of-match screens
+
+- **Winner:** big `0xGG`, `DELIVERED`, `200 OK - last packet standing.`
+- **Losers:** big `0xFF` with a fake fatal error, e.g. `FATAL 0xFF: PACKET_DROPPED / E_TTL_EXCEEDED: time to live reached 0 before delivery`.
+- **Draw (no winner):** `0x00 NULL ROUTE`.
 
 ---
 

@@ -1,0 +1,8 @@
+[package]
+name = "gg-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gg-shared = { path = "../shared" }
+macroquad = "0.4.16"
