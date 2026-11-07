@@ -22,6 +22,9 @@ fn window_conf() -> Conf {
         window_width: 1280,
         window_height: 720,
         window_resizable: false,
+        // Render at the display's real resolution. Without this, Retina /
+        // HiDPI screens get a 1280x720 image stretched 2x by the OS (blurry).
+        high_dpi: true,
         ..Default::default()
     }
 }
