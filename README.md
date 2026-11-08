@@ -18,12 +18,21 @@ Built in Rust with raw `std::net` TCP + UDP sockets for the CS411 Computer Netwo
 | 4. Prediction, interpolation, lag compensation | ⏳ next |
 | 5. Cross-network deploy (bonus) | |
 
-## Requirements
+## Download (no Rust needed)
+
+Grab the zip for your OS from [Releases](https://github.com/3ab3abb/0xGG/releases/latest), unzip it and read its `README.txt`:
+the server machine double-clicks `HOST.bat` (`host.command` on macOS), every player double-clicks `PLAY.bat` (`play.command`) and types the server IP.
+
+To publish a new build: `git tag v0.1.1 && git push origin v0.1.1` (GitHub Actions tests, builds and attaches the zips).
+
+## Build from source
+
+### Requirements
 
 - Rust 1.80+ (`rustup` from https://rustup.rs)
 - Optional: the character sprites (not redistributable, so not in git). Copy the free Seeker_Lite sheets into `assets/seeker/`, see [`assets/CREDITS.md`](assets/CREDITS.md). Without them players are drawn as plain packets.
 
-## Run
+### Run
 
 ```bash
 # Server (machine 1). Listens on TCP and UDP port 7777.

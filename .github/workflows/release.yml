@@ -1,0 +1,80 @@
+# Builds ready-to-run zips for Windows and macOS.
+# Push a tag like v0.1.0 to publish them as a GitHub Release;
+# "Run workflow" (manual) builds them as downloadable CI artifacts only.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x64
+          - os: macos-14
+            name: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --workspace --release
+
+      - name: Build
+        run: cargo build --release -p gg-client -p gg-server
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $d = "0xGG-${{ matrix.name }}"
+          New-Item -ItemType Directory -Force "$d/assets/seeker" | Out-Null
+          Copy-Item target/release/gg-client.exe, target/release/gg-server.exe $d
+          Copy-Item dist/windows/* $d
+          Copy-Item dist/README.txt, assets/CREDITS.md $d
+          Copy-Item dist/PUT_SEEKER_FILES_HERE.txt "$d/assets/seeker/"
+          Compress-Archive -Path $d -DestinationPath "$d.zip"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          d="0xGG-${{ matrix.name }}"
+          mkdir -p "$d/assets/seeker"
+          cp target/release/gg-client target/release/gg-server dist/macos/*.command dist/README.txt assets/CREDITS.md "$d/"
+          cp dist/PUT_SEEKER_FILES_HERE.txt "$d/assets/seeker/"
+          chmod +x "$d"/*.command "$d/gg-client" "$d/gg-server"
+          zip -qry "$d.zip" "$d"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: 0xGG-${{ matrix.name }}.zip
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: "*.zip"
+          body: |
+            **Windows:** download `0xGG-windows-x64.zip`, unzip, read `README.txt`.
+            Server machine runs `HOST.bat`, every player runs `PLAY.bat`.
+
+            **macOS (Apple Silicon):** `0xGG-macos-arm64.zip`, same idea with `host.command` / `play.command`.
+
+            Character sprites are not included (license); copy them into `assets/seeker/` - see README.txt.
