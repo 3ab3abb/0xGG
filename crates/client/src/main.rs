@@ -13,6 +13,7 @@
 mod app;
 mod game_view;
 mod net;
+mod sprites;
 mod ui;
 
 use macroquad::prelude::*;

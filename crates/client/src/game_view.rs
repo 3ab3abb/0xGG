@@ -16,6 +16,7 @@ use gg_shared::udp::{
 use gg_shared::weapons::{Weapon, FIREWALL_H, FIREWALL_W, ITEM_H, ITEM_W};
 use macroquad::prelude::*;
 
+use crate::sprites::{self, Art, SEEKER_EXTRA_H};
 use crate::ui::{text, text_centered, text_width, theme};
 
 const SCALE: f32 = 2.0;
@@ -23,6 +24,12 @@ const FEED_SECONDS: f64 = 6.0;
 const TRACER_SECONDS: f64 = 0.15;
 const BLAST_SECONDS: f64 = 0.4;
 const PICKUP_HINT_RANGE: f32 = 18.0;
+/// How long the PACKET DROPPED puff lingers where a player died.
+const DROP_SECONDS: f64 = 0.9;
+/// Server blade swing length (16 ticks at 60 Hz); the attack animation spans it.
+const SWING_SECONDS: f64 = 16.0 / 60.0;
+/// Checksum Blade reach in world px past the player's edge (matches the server).
+const BLADE_REACH: f32 = 20.0;
 
 pub const CONTROLS: &str =
     "move A/D  jump SPACE  aim up W  drop S+SPACE  shoot J  pick up/throw K  forfeit ESC   (or arrows + Z/X/C)";
@@ -50,6 +57,12 @@ pub struct GameView {
     snaps_stale: u64,
     rate_window: VecDeque<f64>,
     brain: BotBrain,
+    // cosmetics
+    art: Art,
+    /// When each slot's current blade swing started (client clock).
+    swing_start: [Option<f64>; 8],
+    /// (time, world x, world y, slot) of recent deaths, for the drop puff.
+    drops: Vec<(f64, f32, f32, u8)>,
 }
 
 fn read_buttons() -> u16 {
@@ -150,6 +163,9 @@ impl GameView {
             snaps_stale: 0,
             rate_window: VecDeque::new(),
             brain: BotBrain::new(macroquad::rand::rand() as u64 ^ ((get_time() * 1e9) as u64)),
+            art: Art::load(theme::slot_color),
+            swing_start: [None; 8],
+            drops: Vec::new(),
         }
     }
 
@@ -196,7 +212,35 @@ impl GameView {
             self.events_ack = e.id;
             self.on_event(e.kind, now);
         }
+        self.track_animation(&s, now);
         self.latest = Some(s);
+    }
+
+    /// Derive cosmetic animation state (swing start, deaths) from snapshot deltas.
+    fn track_animation(&mut self, s: &Snapshot, now: f64) {
+        for p in &s.players {
+            let Some(slot) = self.swing_start.get_mut(p.slot as usize) else {
+                continue;
+            };
+            let swinging = p.flags & flags::ALIVE != 0 && p.flags & flags::SWINGING != 0;
+            match (swinging, *slot) {
+                (true, None) => *slot = Some(now),
+                (false, Some(_)) => *slot = None,
+                _ => {}
+            }
+            let was_alive = self.latest.as_ref().and_then(|l| {
+                l.players
+                    .iter()
+                    .find(|q| q.slot == p.slot)
+                    .map(|q| (q.flags & flags::ALIVE != 0, q.x, q.y))
+            });
+            if let Some((true, x, y)) = was_alive {
+                if p.flags & flags::ALIVE == 0 {
+                    self.drops
+                        .push((now, x + PLAYER_W / 2.0, y + PLAYER_H / 2.0, p.slot));
+                }
+            }
+        }
     }
 
     fn on_event(&mut self, kind: EventKind, now: f64) {
@@ -284,6 +328,7 @@ impl GameView {
                     Effect::Blast { .. } => BLAST_SECONDS,
                 }
         });
+        self.drops.retain(|d| now - d.0 < DROP_SECONDS);
         out
     }
 
@@ -360,14 +405,10 @@ impl GameView {
             };
             let p = w2s(it.x + ITEM_W / 2.0 - 4.0, it.y + ITEM_H / 2.0);
             let empty = it.weapon.max_ammo() > 0 && it.ammo == 0;
-            draw_weapon(
-                it.weapon,
-                p.x,
-                p.y + bob,
-                true,
-                false,
-                if empty { 0.4 } else { 1.0 },
-            );
+            let alpha = if empty { 0.4 } else { 1.0 };
+            if !self.draw_weapon_sprite(it.weapon, vec2(p.x, p.y + bob), true, false, alpha) {
+                draw_weapon(it.weapon, p.x, p.y + bob, true, false, alpha);
+            }
         }
 
         for p in &s.players {
@@ -389,6 +430,11 @@ impl GameView {
                         3.0
                     } * SCALE;
                     let blink = (now * 12.0) as i64 % 2 == 0;
+                    if pr.kind == ProjectileKind::Bomb {
+                        let c = if blink { WHITE } else { Color::new(0.75, 0.6, 0.6, 1.0) };
+                        sprites::draw_vector(&self.art.fork_bomb, p, vec2(0.5, 0.5), SCALE, 0.0, false, c);
+                        continue;
+                    }
                     let c = if blink {
                         Color::new(1.0, 0.3, 0.3, 1.0)
                     } else {
@@ -413,6 +459,10 @@ impl GameView {
                         3.0,
                         Color::new(1.0, 1.0, 0.8, a.max(0.0)),
                     );
+                    if age < 0.07 {
+                        let angle = (p1.y - p0.y).atan2(p1.x - p0.x);
+                        sprites::draw_vector(&self.art.muzzle, p0, vec2(0.05, 0.5), SCALE * 0.8, angle, false, WHITE);
+                    }
                 }
                 Effect::Blast { x, y, radius } => {
                     let k = age / BLAST_SECONDS as f32;
@@ -435,7 +485,100 @@ impl GameView {
             }
         }
 
+        // PACKET DROPPED: a puff in the victim's colour where it died.
+        for &(t, x, y, slot) in &self.drops {
+            let age = (now - t) as f32;
+            let k = age / DROP_SECONDS as f32;
+            let frame = ((age / 0.12) as usize).min(2);
+            let c = theme::slot_color(slot);
+            let a = if k < 0.6 { 1.0 } else { (1.0 - k) / 0.4 };
+            let p = w2s(x, y);
+            sprites::draw_vector(&self.art.drops[frame], p, vec2(0.5, 0.6), SCALE, 0.0, false, with_alpha(c, a));
+            text_centered("PACKET DROPPED", p.x, p.y - 34.0 - age * 20.0, 18.0, with_alpha(theme::ERROR, a));
+        }
+
         self.draw_hud(s);
+    }
+
+    /// Draw a held or dropped weapon with pack art; false if it has none
+    /// (Firewall and Checksum Blade keep their procedural look).
+    fn draw_weapon_sprite(&self, w: Weapon, grip: Vec2, right: bool, up: bool, alpha: f32) -> bool {
+        let (tex, anchor) = match w {
+            Weapon::PingPistol => (&self.art.pistol, vec2(0.25, 0.55)),
+            Weapon::BroadcastShotgun => (&self.art.shotgun, vec2(0.3, 0.55)),
+            Weapon::ForkBomb => (&self.art.fork_bomb, vec2(0.5, 0.5)),
+            _ => return false,
+        };
+        let c = with_alpha(WHITE, alpha);
+        if up && w != Weapon::ForkBomb {
+            sprites::draw_vector(tex, grip, anchor, SCALE, -std::f32::consts::FRAC_PI_2, false, c);
+        } else {
+            sprites::draw_vector(tex, grip, anchor, SCALE, 0.0, !right, c);
+        }
+        true
+    }
+
+    /// Seeker character for this player; returns false when the art isn't installed.
+    fn draw_seeker(&self, p: &PlayerState, x: f32, y: f32, now: f64) -> bool {
+        let Some(sk) = self.art.seeker(p.slot) else {
+            return false;
+        };
+        let right = p.flags & flags::FACING_RIGHT != 0;
+        let up = p.flags & flags::AIMING_UP != 0;
+        let feet = vec2(x + PLAYER_W * SCALE / 2.0, y + PLAYER_H * SCALE);
+        // De-sync idle/run cycles between players.
+        let t = now + p.slot as f64 * 0.37;
+        let swing = self
+            .swing_start
+            .get(p.slot as usize)
+            .copied()
+            .flatten()
+            .filter(|_| p.flags & flags::SWINGING != 0);
+        if let Some(start) = swing {
+            let f = (((now - start) / SWING_SECONDS) * 8.0) as usize;
+            sk.attack_body.draw(f, feet, right, SCALE, WHITE);
+            // The pack's slash is ~62 px long; shrink it to the real hit reach.
+            let k = (PLAYER_W / 2.0 + BLADE_REACH) / 62.0 * SCALE;
+            if up {
+                let s = &sk.attack_slash;
+                let size = vec2(s.fw, s.fh) * k;
+                let pivot = feet - vec2(0.0, PLAYER_H * SCALE / 2.0);
+                let pos = pivot - vec2(s.pivot.x, s.pivot.y - 8.0) * k;
+                draw_texture_ex(
+                    &s.tex,
+                    pos.x,
+                    pos.y,
+                    WHITE,
+                    DrawTextureParams {
+                        dest_size: Some(size),
+                        source: Some(Rect::new(f.min(7) as f32 * s.fw, 0.0, s.fw, s.fh)),
+                        rotation: -std::f32::consts::FRAC_PI_2,
+                        pivot: Some(pivot),
+                        ..Default::default()
+                    },
+                );
+            } else {
+                sk.attack_slash.draw(f, feet, right, k, WHITE);
+            }
+            return true;
+        }
+        if p.flags & flags::STUNNED != 0 {
+            sk.hurt.draw(((t / 0.06) as usize) % sk.hurt.n, feet, right, SCALE, WHITE);
+        } else if p.flags & flags::GROUNDED == 0 {
+            let f = if p.vy < -40.0 {
+                1 + (((p.vy + 340.0) / 300.0).clamp(0.0, 1.0) * 11.0) as usize
+            } else if p.vy < 60.0 {
+                13 + (p.vy > 10.0) as usize
+            } else {
+                15 + ((t / 0.04) as usize) % 11
+            };
+            sk.jump.draw(f, feet, right, SCALE, WHITE);
+        } else if p.vx.abs() > 20.0 {
+            sk.run.draw(((t / 0.07) as usize) % sk.run.n, feet, right, SCALE, WHITE);
+        } else {
+            sk.idle.draw(((t / 0.1) as usize) % sk.idle.n, feet, right, SCALE, WHITE);
+        }
+        true
     }
 
     fn draw_player(&self, p: &PlayerState, pos: Vec2, now: f64) {
@@ -445,27 +588,30 @@ impl GameView {
         let right = p.flags & flags::FACING_RIGHT != 0;
         let up = p.flags & flags::AIMING_UP != 0;
 
-        // Body + darker "header" band: it's a packet.
-        draw_rectangle(x, y, w, h, color);
-        draw_rectangle(
-            x,
-            y,
-            w,
-            4.0 * SCALE,
-            Color::new(color.r * 0.55, color.g * 0.55, color.b * 0.55, 1.0),
-        );
-        // Eyes look where the packet faces (or up when aiming up).
-        let ex = if right { x + w - 10.0 } else { x + 2.0 };
-        let (px, py) = if up {
-            (1.0, 0.0)
-        } else if right {
-            (2.0, 2.0)
-        } else {
-            (0.0, 2.0)
-        };
-        for dx in [0.0, 5.0] {
-            draw_rectangle(ex + dx, y + 10.0, 4.0, 6.0, WHITE);
-            draw_rectangle(ex + dx + px, y + 10.0 + py, 2.0, 3.0, BLACK);
+        let seeker = self.draw_seeker(p, x, y, now);
+        if !seeker {
+            // Body + darker "header" band: it's a packet.
+            draw_rectangle(x, y, w, h, color);
+            draw_rectangle(
+                x,
+                y,
+                w,
+                4.0 * SCALE,
+                Color::new(color.r * 0.55, color.g * 0.55, color.b * 0.55, 1.0),
+            );
+            // Eyes look where the packet faces (or up when aiming up).
+            let ex = if right { x + w - 10.0 } else { x + 2.0 };
+            let (px, py) = if up {
+                (1.0, 0.0)
+            } else if right {
+                (2.0, 2.0)
+            } else {
+                (0.0, 2.0)
+            };
+            for dx in [0.0, 5.0] {
+                draw_rectangle(ex + dx, y + 10.0, 4.0, 6.0, WHITE);
+                draw_rectangle(ex + dx + px, y + 10.0 + py, 2.0, 3.0, BLACK);
+            }
         }
 
         if let Some(wpn) = p.weapon {
@@ -477,8 +623,14 @@ impl GameView {
                 x + 4.0
             };
             let gy = if up { y + 4.0 } else { y + h / 2.0 + 2.0 };
-            draw_weapon(wpn, gx, gy, right, up, 1.0);
-            if wpn == Weapon::ChecksumBlade && p.flags & flags::SWINGING != 0 {
+            let swinging = p.flags & flags::SWINGING != 0;
+            // While swinging, Seeker's attack animation shows the blade itself.
+            if !(seeker && swinging && wpn == Weapon::ChecksumBlade)
+                && !self.draw_weapon_sprite(wpn, vec2(gx, gy), right, up, 1.0)
+            {
+                draw_weapon(wpn, gx, gy, right, up, 1.0);
+            }
+            if wpn == Weapon::ChecksumBlade && swinging && !seeker {
                 let reach = 20.0 * SCALE;
                 let c = Color::new(0.4, 1.0, 0.9, 0.35);
                 if up {
@@ -497,10 +649,10 @@ impl GameView {
             }
         }
 
-        let mut label_y = y - 6.0;
+        let mut label_y = y - 6.0 - if seeker { SEEKER_EXTRA_H * SCALE } else { 0.0 };
         if p.flags & flags::STUNNED != 0 && (now * 8.0) as i64 % 2 == 0 {
-            text_centered("ERR", x + w / 2.0, y - 24.0, 18.0, theme::WARN);
-            label_y = y - 40.0;
+            text_centered("ERR", x + w / 2.0, label_y - 18.0, 18.0, theme::WARN);
+            label_y -= 34.0;
         }
         let lc = if p.slot == self.your_slot {
             theme::ACCENT

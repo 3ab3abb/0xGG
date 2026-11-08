@@ -21,6 +21,7 @@ Built in Rust with raw `std::net` TCP + UDP sockets for the CS411 Computer Netwo
 ## Requirements
 
 - Rust 1.80+ (`rustup` from https://rustup.rs)
+- Optional: the character sprites (not redistributable, so not in git). Copy the free Seeker_Lite sheets into `assets/seeker/`, see [`assets/CREDITS.md`](assets/CREDITS.md). Without them players are drawn as plain packets.
 
 ## Run
 
@@ -95,4 +96,6 @@ crates/shared   protocol messages, TCP framing, UDP packets, physics simulation,
 crates/server   accept loop, per-connection reader/writer threads, lobby thread, UDP router, 60 Hz game loop per match, account store
 crates/client   macroquad app: login, lobby, room, game view, results (0xGG / 0xFF)
 assets/maps     ASCII maps (compiled into both binaries)
+assets/sprites  CC0 weapon/effect sprites (compiled into the client)
+assets/seeker   character sheets, loaded at runtime if present (gitignored, see assets/CREDITS.md)
 ```

@@ -12,3 +12,8 @@ users.json
 .DS_Store
 .vscode/
 .idea/
+
+# Art: Seeker_Lite's license forbids redistributing it (install locally, see assets/CREDITS.md);
+# raw downloaded packs and mockups stay local too.
+/assets/seeker/
+/assets/packs/
