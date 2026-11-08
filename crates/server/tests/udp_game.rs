@@ -145,33 +145,38 @@ fn inputs_move_the_packet_in_snapshots() {
     let mut first_playing_x: Option<f32> = None;
     let mut last: Option<Snapshot> = None;
     let mut snapshots = 0;
+    a.udp
+        .set_read_timeout(Some(Duration::from_millis(5)))
+        .unwrap();
     while started.elapsed() < Duration::from_secs(5) {
-        seq += 1;
-        history.push(InputFrame {
-            seq,
-            buttons: buttons::RIGHT,
-            view_tick: 0,
-        });
-        let frames = history[history.len().saturating_sub(3)..].to_vec();
-        a.udp_send(&ClientPacket::Input {
-            token: a.token,
-            frames,
-            last_snapshot_tick: 0,
-            events_ack: 0,
-        });
-        b.udp_send(&ClientPacket::Input {
-            token: b.token,
-            frames: vec![InputFrame {
+        // Pace inputs by wall clock (60 per second) like the real client, not by
+        // loop iterations: socket timeouts round up to ~16 ms ticks on Windows.
+        let due = (started.elapsed().as_secs_f64() * 60.0) as u32 + 1;
+        while seq < due {
+            seq += 1;
+            history.push(InputFrame {
                 seq,
-                buttons: 0,
+                buttons: buttons::RIGHT,
                 view_tick: 0,
-            }],
-            last_snapshot_tick: 0,
-            events_ack: 0,
-        });
-        a.udp
-            .set_read_timeout(Some(Duration::from_millis(16)))
-            .unwrap();
+            });
+            let frames = history[history.len().saturating_sub(3)..].to_vec();
+            a.udp_send(&ClientPacket::Input {
+                token: a.token,
+                frames,
+                last_snapshot_tick: 0,
+                events_ack: 0,
+            });
+            b.udp_send(&ClientPacket::Input {
+                token: b.token,
+                frames: vec![InputFrame {
+                    seq,
+                    buttons: 0,
+                    view_tick: 0,
+                }],
+                last_snapshot_tick: 0,
+                events_ack: 0,
+            });
+        }
         while let Some(ServerPacket::Snapshot(s)) = a.udp_recv() {
             snapshots += 1;
             if let Some(prev) = &last {
