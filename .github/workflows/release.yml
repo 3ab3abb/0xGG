@@ -72,9 +72,10 @@ jobs:
         with:
           files: "*.zip"
           body: |
-            **Windows:** download `0xGG-windows-x64.zip`, unzip, read `README.txt`.
-            Server machine runs `HOST.bat`, every player runs `PLAY.bat`.
+            **Everyone just opens the game.** One player presses **HOST GAME** on the login screen and sends the IP it shows (COPY button); the others type it in the *host's IP* box. `HOST.bat` / `host.command` still run a dedicated server.
 
-            **macOS (Apple Silicon):** `0xGG-macos-arm64.zip`, same idea with `host.command` / `play.command`.
+            **Windows:** `0xGG-windows-x64.zip`, unzip, double-click `PLAY.bat`. Allow the firewall popup on the host (tick Private and Public).
+
+            **macOS (Apple Silicon):** `0xGG-macos-arm64.zip`, double-click `play.command`.
 
             Character sprites are not included (license); copy them into `assets/seeker/` - see README.txt.
