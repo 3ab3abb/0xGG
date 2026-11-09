@@ -27,6 +27,32 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      # The Seeker character sheets may be used in the game but not shared as
+      # files, so they never live in this public repo: the zip is stored as an
+      # encrypted secret, unpacked here, and compiled into gg-client (build.rs).
+      - name: Character art (embedded in the binary, never shipped as files)
+        shell: bash
+        env:
+          SEEKER_LITE_ZIP_B64: ${{ secrets.SEEKER_LITE_ZIP_B64 }}
+        run: |
+          if [ -z "$SEEKER_LITE_ZIP_B64" ]; then
+            echo "::warning::SEEKER_LITE_ZIP_B64 secret not set: building without character art"
+            exit 0
+          fi
+          PY=$(command -v python3 || command -v python)
+          "$PY" - <<'PYEOF'
+          import base64, io, os, zipfile
+          z = zipfile.ZipFile(io.BytesIO(base64.b64decode(os.environ["SEEKER_LITE_ZIP_B64"])))
+          os.makedirs("assets/seeker", exist_ok=True)
+          n = 0
+          for name in z.namelist():
+              if "/Spritesheets/" in name and name.endswith(".png"):
+                  with open(os.path.join("assets/seeker", os.path.basename(name)), "wb") as f:
+                      f.write(z.read(name))
+                  n += 1
+          print(f"unpacked {n} sheets")
+          PYEOF
+
       - name: Test
         run: cargo test --workspace --release
 
@@ -38,20 +64,18 @@ jobs:
         shell: pwsh
         run: |
           $d = "0xGG-${{ matrix.name }}"
-          New-Item -ItemType Directory -Force "$d/assets/seeker" | Out-Null
+          New-Item -ItemType Directory -Force $d | Out-Null
           Copy-Item target/release/gg-client.exe, target/release/gg-server.exe $d
           Copy-Item dist/windows/* $d
           Copy-Item dist/README.txt, assets/CREDITS.md $d
-          Copy-Item dist/PUT_SEEKER_FILES_HERE.txt "$d/assets/seeker/"
           Compress-Archive -Path $d -DestinationPath "$d.zip"
 
       - name: Package (macOS)
         if: runner.os == 'macOS'
         run: |
           d="0xGG-${{ matrix.name }}"
-          mkdir -p "$d/assets/seeker"
+          mkdir -p "$d"
           cp target/release/gg-client target/release/gg-server dist/macos/*.command dist/README.txt assets/CREDITS.md "$d/"
-          cp dist/PUT_SEEKER_FILES_HERE.txt "$d/assets/seeker/"
           chmod +x "$d"/*.command "$d/gg-client" "$d/gg-server"
           zip -qry "$d.zip" "$d"
 
@@ -77,5 +101,3 @@ jobs:
             **Windows:** `0xGG-windows-x64.zip`, unzip, double-click `PLAY.bat`. Allow the firewall popup on the host (tick Private and Public).
 
             **macOS (Apple Silicon):** `0xGG-macos-arm64.zip`, double-click `play.command`.
-
-            Character sprites are not included (license); copy them into `assets/seeker/` - see README.txt.

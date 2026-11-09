@@ -195,6 +195,7 @@ struct Snapshot {
     projectiles: [ProjectileState; ≤32],  // pellets, bombs, forked shards
     firewalls: [FirewallState],
     events: [Event; ≤20],            // reliable events not yet acked by this client (§5.4)
+    you: Option<PlayerSim>,          // THIS client's full physics state after ack_input_seq (§9); None if dead
 }
 struct PlayerState { slot: u8, x: f32, y: f32, vx: f32, vy: f32,
                      flags: u8 /*alive, facing_right, grounded, connected, aiming_up, stunned, swinging*/,
@@ -206,7 +207,7 @@ struct FirewallState { id: u16, x: f32, y: f32, ms_left: u16 }
 
 **Snapshots are full state, not deltas.** No snapshot depends on a previous one, so loss never corrupts state. Client rule: **drop any snapshot whose `tick` ≤ latest received tick** (handles reordering and duplicates).
 
-**Size budget (asserted in `udp::tests`):** the worst possible snapshot (32 projectiles, 20 tracer events, 10 items, 6 firewalls) encodes to **1028 bytes**, under the 1200-byte cap. A first draft with 48 projectiles / 24 events was 1284 bytes and failed this test, which is why the caps exist. Typical snapshots are 150–300 bytes.
+**Size budget (asserted in `udp::tests`):** the worst possible snapshot (32 projectiles, 20 tracer events, 10 items, 6 firewalls, plus `you`) encodes to **1052 bytes**, under the 1200-byte cap. A first draft with 48 projectiles / 24 events was 1284 bytes and failed this test, which is why the caps exist. Typical snapshots are 150–300 bytes.
 
 Bandwidth estimate (typical ~250 B/snapshot): 450 B × 30 Hz × 3 clients ≈ **40 KB/s** total downstream from the server. Inputs ≈ 45 B × 60 Hz ≈ 2.7 KB/s per client.
 
@@ -339,6 +340,14 @@ Whichever layer fires first, the server runs the **same cleanup path** once (ide
 | **Lag compensation** | Ping Pistol (hitscan), Checksum Blade | Server keeps 1 s of hitbox history; on SHOOT it rewinds targets to the shooter's `view_tick` (clamped to 200 ms) and tests the hit there. |
 
 Build order: plain snapshots first (works, a bit laggy) → prediction/reconciliation → interpolation → lag compensation. Each layer is independently demoable.
+
+**As implemented** (`crates/client/src/netcode.rs`):
+
+- *Prediction.* Each 60 Hz input is pushed to a pending list and immediately stepped through the shared `PlayerSim::step`. Prediction runs only while the server moves players (not during the countdown) and you are alive.
+- *Reconciliation.* `PlayerState` only carries position/velocity, but `step` also depends on hidden timers (coyote time, jump buffer, drop-through, stun, previous buttons). So each snapshot carries `you`: the receiver's **full** `PlayerSim` right after `ack_input_seq`. The client drops pending inputs `≤ ack`, restarts from `you`, and replays the rest. Because the simulation is deterministic, a server that saw the same inputs gives **zero** error (measured: 449 of 450 reconciliations exact at 150 ms RTT). Real disagreements (a stomp bounce, shotgun recoil, a stun) are corrected; errors up to 48 px are blended away over ~100 ms, bigger ones (respawn) snap.
+- *Interpolation.* Snapshots are buffered (~1 s). The client estimates the server clock (`server_tick − local_time·60`, following fresher samples quickly and late ones slowly) and draws others at `estimated_tick − 6` (100 ms), blending positions of players, projectiles and items between the two surrounding snapshots. Moves > 48 px between snapshots are teleports and are not blended. If the buffer runs dry, the newest snapshot is held (no extrapolation).
+- *`view_tick`.* Inputs now report the interpolated tick actually on screen, which is what server-side lag compensation needs.
+- *Demo.* `--lag 75` delays every UDP packet 75 ms each way (150 ms RTT) on a LAN; `--loss N` drops packets. In a match, **F1** toggles prediction and **F2** interpolation; the HUD shows inputs in flight and the size of the last correction.
 
 ---
 

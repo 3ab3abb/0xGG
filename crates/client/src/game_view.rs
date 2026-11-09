@@ -1,8 +1,9 @@
 //! In-match client: samples input at a fixed 60 Hz, sends it over UDP with
 //! redundancy, consumes snapshots and reliable events, and renders.
 //!
-//! The view draws the latest snapshot as-is (prediction and interpolation
-//! come in milestone 4), so what you see is exactly the server's state.
+//! Your own packet is drawn from client-side prediction, everything else
+//! from entity interpolation ~100 ms in the past (see `netcode`). F1 / F2
+//! toggle each technique live, to compare against the raw server state.
 
 use std::collections::VecDeque;
 
@@ -16,6 +17,9 @@ use gg_shared::udp::{
 use gg_shared::weapons::{Weapon, FIREWALL_H, FIREWALL_W, ITEM_H, ITEM_W};
 use macroquad::prelude::*;
 
+use crate::screen::{VH, VW};
+
+use crate::netcode::{Interpolator, Predictor};
 use crate::sprites::{self, Art, SEEKER_EXTRA_H};
 use crate::ui::{text, text_centered, text_width, theme};
 
@@ -44,7 +48,16 @@ pub struct GameView {
     pub slots: Vec<SlotInfo>,
     pub your_slot: u8,
     latest: Option<Snapshot>,
+    /// What gets drawn this frame: interpolated world + predicted self.
+    view: Option<Snapshot>,
     events_ack: u32,
+    // latency hiding
+    pred: Predictor,
+    interp: Interpolator,
+    predict_on: bool,
+    interp_on: bool,
+    /// Buttons of the newest local input (aim-up is drawn from it).
+    last_buttons: u16,
     feed: VecDeque<(f64, String, Color)>,
     effects: Vec<(f64, Effect)>,
     // input
@@ -152,7 +165,13 @@ impl GameView {
             slots,
             your_slot,
             latest: None,
+            view: None,
             events_ack: 0,
+            pred: Predictor::default(),
+            interp: Interpolator::default(),
+            predict_on: true,
+            interp_on: true,
+            last_buttons: 0,
             feed: VecDeque::new(),
             effects: Vec::new(),
             seq: 0,
@@ -213,6 +232,8 @@ impl GameView {
             self.on_event(e.kind, now);
         }
         self.track_animation(&s, now);
+        self.interp.push(&s, now);
+        self.pred.on_snapshot(&s, &self.map, self.predict_on);
         self.latest = Some(s);
     }
 
@@ -300,7 +321,24 @@ impl GameView {
         } else {
             read_buttons()
         };
-        let view_tick = self.latest.as_ref().map_or(0, |s| s.tick);
+        // Demo toggles: compare with and without each technique.
+        if is_key_pressed(KeyCode::F1) {
+            self.predict_on = !self.predict_on;
+            if !self.predict_on {
+                self.pred.sim = None; // restarts from the next snapshot when re-enabled
+            }
+        }
+        if is_key_pressed(KeyCode::F2) {
+            self.interp_on = !self.interp_on;
+        }
+        let now = get_time();
+        let latest_tick = self.latest.as_ref().map_or(0, |s| s.tick);
+        // The tick we actually display for others (for server lag compensation).
+        let view_tick = match self.interp.render_tick(now) {
+            Some(t) if self.interp_on => (t.max(0.0) as u32).min(latest_tick),
+            _ => latest_tick,
+        };
+        self.last_buttons = b;
         let mut out = Vec::new();
         while self.acc >= DT {
             self.acc -= DT;
@@ -313,6 +351,8 @@ impl GameView {
             while self.history.len() > INPUT_REDUNDANCY {
                 self.history.pop_front();
             }
+            // Prediction: apply this input locally now, don't wait for the server.
+            self.pred.on_input(self.seq, b, &self.map);
             out.push(ClientPacket::Input {
                 token,
                 frames: self.history.iter().copied().collect(),
@@ -320,7 +360,8 @@ impl GameView {
                 events_ack: self.events_ack,
             });
         }
-        let now = get_time();
+        self.pred.decay(get_frame_time());
+        self.view = self.build_view(now);
         self.effects.retain(|(t, e)| {
             now - t
                 < match e {
@@ -342,21 +383,65 @@ impl GameView {
             .latest
             .as_ref()
             .map_or(0, |s| self.seq.saturating_sub(s.ack_input_seq));
+        let on = |b: bool| if b { "ON" } else { "off" };
         format!(
-            "snapshots {}/s  loss {:.1}%  stale {}  inputs in flight {}",
+            "snapshots {}/s  loss {:.1}%  stale {}  inputs in flight {}   |   [F1] prediction {} (last fix {:.1} px)   [F2] interpolation {}",
             self.rate_window.len(),
             loss.max(0.0),
             self.snaps_stale,
-            unacked
+            unacked,
+            on(self.predict_on),
+            self.pred.last_error,
+            on(self.interp_on),
         )
+    }
+
+    /// The world to draw: others interpolated in the past (or the raw latest
+    /// snapshot), our own packet at its predicted position.
+    fn build_view(&self, now: f64) -> Option<Snapshot> {
+        let latest = self.latest.as_ref()?;
+        let mut v = if self.interp_on {
+            self.interp.sample(now).unwrap_or_else(|| latest.clone())
+        } else {
+            latest.clone()
+        };
+        // Our own packet always comes from the newest snapshot (weapon, alive)
+        // and, when predicting, takes the predicted position and pose.
+        let Some(mut me) = latest
+            .players
+            .iter()
+            .find(|p| p.slot == self.your_slot)
+            .copied()
+        else {
+            return Some(v);
+        };
+        if let (Some(sim), Some((x, y))) = (self.pred.sim, self.pred.draw_pos()) {
+            (me.x, me.y, me.vx, me.vy) = (x, y, sim.vx, sim.vy);
+            let set = |f: &mut u8, bit: u8, on: bool| {
+                if on {
+                    *f |= bit
+                } else {
+                    *f &= !bit
+                }
+            };
+            set(&mut me.flags, flags::FACING_RIGHT, sim.facing_right);
+            set(&mut me.flags, flags::GROUNDED, sim.grounded);
+            let aiming = self.last_buttons & buttons::AIM_UP != 0 && sim.stun == 0;
+            set(&mut me.flags, flags::AIMING_UP, aiming);
+        }
+        match v.players.iter_mut().find(|p| p.slot == self.your_slot) {
+            Some(p) => *p = me,
+            None => v.players.push(me),
+        }
+        Some(v)
     }
 
     // ------------------------------------------------------------- render
 
     fn origin(&self) -> Vec2 {
         vec2(
-            (screen_width() - self.map.pixel_width() * SCALE) / 2.0,
-            (screen_height() - self.map.pixel_height() * SCALE) / 2.0,
+            (VW - self.map.pixel_width() * SCALE) / 2.0,
+            (VH - self.map.pixel_height() * SCALE) / 2.0,
         )
     }
 
@@ -364,11 +449,11 @@ impl GameView {
         let o = self.origin();
         let w2s = |x: f32, y: f32| vec2(o.x + x * SCALE, o.y + y * SCALE);
         self.draw_map(o);
-        let Some(s) = &self.latest else {
+        let (Some(hud), Some(s)) = (&self.latest, &self.view) else {
             text_centered(
                 "waiting for first snapshot over UDP...",
-                screen_width() / 2.0,
-                screen_height() / 2.0,
+                VW / 2.0,
+                VH / 2.0,
                 28.0,
                 theme::DIM,
             );
@@ -497,7 +582,7 @@ impl GameView {
             text_centered("PACKET DROPPED", p.x, p.y - 34.0 - age * 20.0, 18.0, with_alpha(theme::ERROR, a));
         }
 
-        self.draw_hud(s);
+        self.draw_hud(hud, s);
     }
 
     /// Draw a held or dropped weapon with pack art; false if it has none
@@ -721,8 +806,9 @@ impl GameView {
         }
     }
 
-    fn draw_hud(&self, s: &Snapshot) {
-        let cx = screen_width() / 2.0;
+    /// `s`: newest snapshot (scores, phase). `view`: what's drawn (positions).
+    fn draw_hud(&self, s: &Snapshot, view: &Snapshot) {
+        let cx = VW / 2.0;
 
         // Scores: round wins as pips, first to 5.
         let mut x = 24.0;
@@ -784,7 +870,7 @@ impl GameView {
             }
         }
 
-        let me = s.players.iter().find(|p| p.slot == self.your_slot);
+        let me = view.players.iter().find(|p| p.slot == self.your_slot);
         let me_alive = me.is_some_and(|p| p.flags & flags::ALIVE != 0);
         if !me_alive && matches!(s.phase, RoundPhase::Playing { .. }) {
             text_centered("PACKET DROPPED", cx, 200.0, 48.0, theme::ERROR);
@@ -803,7 +889,7 @@ impl GameView {
                     ".".repeat((w.max_ammo() - me.ammo) as usize)
                 ),
                 None => {
-                    let near = s.items.iter().any(|it| {
+                    let near = view.items.iter().any(|it| {
                         let dx = it.x + ITEM_W / 2.0 - (me.x + PLAYER_W / 2.0);
                         let dy = it.y + ITEM_H / 2.0 - (me.y + PLAYER_H / 2.0);
                         (dx * dx + dy * dy).sqrt() <= PICKUP_HINT_RANGE
@@ -818,8 +904,8 @@ impl GameView {
             let w = text_width(&line, 22.0);
             text(
                 &line,
-                screen_width() - w - 40.0,
-                screen_height() - 38.0,
+                VW - w - 40.0,
+                VH - 38.0,
                 22.0,
                 theme::TEXT,
             );
@@ -833,17 +919,17 @@ impl GameView {
                 continue;
             }
             let w = text_width(line, 20.0);
-            text(line, screen_width() - w - 40.0, y, 20.0, *color);
+            text(line, VW - w - 40.0, y, 20.0, *color);
             y += 24.0;
         }
 
         text(
             &self.net_stats(),
             40.0,
-            screen_height() - 34.0,
+            VH - 34.0,
             16.0,
             theme::DIM,
         );
-        text(CONTROLS, 40.0, screen_height() - 50.0, 16.0, theme::DIM);
+        text(CONTROLS, 40.0, VH - 50.0, 16.0, theme::DIM);
     }
 }

@@ -553,6 +553,7 @@ impl Game {
             let snapshot = Snapshot {
                 tick: self.tick,
                 ack_input_seq: p.last_applied_seq,
+                you: p.alive.then_some(p.sim),
                 round: self.round,
                 phase,
                 scores: scores.clone(),
@@ -1028,6 +1029,7 @@ mod tests {
         let snap = Snapshot {
             tick: g.tick,
             ack_input_seq: 0,
+            you: None,
             round: g.round,
             phase: RoundPhase::Playing { ms_left: 0 },
             scores: vec![],

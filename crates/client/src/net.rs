@@ -5,6 +5,7 @@
 //! and hands complete messages to the main loop through a channel; the main
 //! loop polls it once per frame without ever blocking.
 
+use std::collections::VecDeque;
 use std::io::{self, BufReader};
 use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -122,6 +123,12 @@ pub struct UdpLink {
     rx: Receiver<(ServerPacket, f64)>,
     stop: Arc<AtomicBool>,
     loss: f32,
+    /// Simulated one-way delay in ms (`--lag`), applied in both directions.
+    lag_ms: f64,
+    /// Outgoing datagrams held back until `due` (ms, `now_ms` clock).
+    delayed_out: VecDeque<(f64, Vec<u8>)>,
+    /// Incoming packets held back until `due`.
+    delayed_in: VecDeque<(f64, ServerPacket)>,
     pub sent: u64,
     pub received: u64,
 }
@@ -131,7 +138,7 @@ fn chance(p: f32) -> bool {
 }
 
 impl UdpLink {
-    pub fn open(server: SocketAddr, loss: f32) -> io::Result<Self> {
+    pub fn open(server: SocketAddr, loss: f32, lag_ms: f64) -> io::Result<Self> {
         let bind = if server.is_ipv4() {
             "0.0.0.0:0"
         } else {
@@ -168,6 +175,9 @@ impl UdpLink {
             rx,
             stop,
             loss,
+            lag_ms,
+            delayed_out: VecDeque::new(),
+            delayed_in: VecDeque::new(),
             sent: 0,
             received: 0,
         })
@@ -179,14 +189,42 @@ impl UdpLink {
             return; // simulated loss on the way out
         }
         if let Ok(bytes) = udp::encode(packet) {
-            // UDP send errors (e.g. ICMP unreachable) are not fatal: the
-            // heartbeat/TCP layer decides whether we are disconnected.
-            let _ = self.socket.send(&bytes);
+            if self.lag_ms > 0.0 {
+                self.delayed_out.push_back((now_ms() + self.lag_ms, bytes));
+                self.flush_out();
+            } else {
+                // UDP send errors (e.g. ICMP unreachable) are not fatal: the
+                // heartbeat/TCP layer decides whether we are disconnected.
+                let _ = self.socket.send(&bytes);
+            }
         }
     }
 
+    fn flush_out(&mut self) {
+        let now = now_ms();
+        while self.delayed_out.front().is_some_and(|(due, _)| *due <= now) {
+            if let Some((_, bytes)) = self.delayed_out.pop_front() {
+                let _ = self.socket.send(&bytes);
+            }
+        }
+    }
+
+    /// Packets that have arrived, with their arrival time (`now_ms`). With
+    /// `--lag`, a packet is only delivered `lag_ms` after it really arrived.
     pub fn poll(&mut self) -> Vec<(ServerPacket, f64)> {
-        let v: Vec<(ServerPacket, f64)> = self.rx.try_iter().collect();
+        let mut v: Vec<(ServerPacket, f64)> = self.rx.try_iter().collect();
+        if self.lag_ms > 0.0 {
+            self.flush_out();
+            for (p, arrived) in v.drain(..) {
+                self.delayed_in.push_back((arrived + self.lag_ms, p));
+            }
+            let now = now_ms();
+            while self.delayed_in.front().is_some_and(|(due, _)| *due <= now) {
+                if let Some((due, p)) = self.delayed_in.pop_front() {
+                    v.push((p, due));
+                }
+            }
+        }
         self.received += v.len() as u64;
         v
     }

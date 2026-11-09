@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 /// Bumped on any incompatible protocol change; checked in `Welcome`.
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
 
 /// Same port number for TCP and UDP (separate port spaces).
 pub const DEFAULT_PORT: u16 = 7777;

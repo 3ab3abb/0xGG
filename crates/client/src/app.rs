@@ -1,5 +1,5 @@
 //! Client state machine and screens:
-//! Login → Lobby ("The Switch") → Room ("Port") → Match → Results (0xGG / 0xFF).
+//! Title → Login → Lobby ("The Switch") → Room ("Port") → Match → Results (0xGG / 0xFF).
 
 use std::collections::VecDeque;
 
@@ -7,11 +7,14 @@ use gg_shared::constants::*;
 use gg_shared::protocol::*;
 use macroquad::prelude::*;
 
+use crate::screen::{VH, VW};
+
 use gg_shared::game::builtin_map;
 use gg_shared::udp::{ClientPacket, ServerPacket};
 
 use crate::game_view::GameView;
 use crate::host::{self, HostedServer};
+use crate::title::{Title, TitleAction};
 use crate::net::{now_ms, Connection, NetEvent, UdpLink};
 use crate::ui::{self, panel, text, text_centered, theme, Ui};
 
@@ -23,6 +26,7 @@ const F_CHAT: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
+    Title,
     Login,
     Lobby,
     Room,
@@ -105,8 +109,12 @@ pub struct App {
     last_udp_ping: f64,
     /// Simulated UDP packet loss (0.0-1.0), from `--loss`.
     loss: f32,
+    /// Simulated one-way UDP delay in ms (`--lag`), to demo prediction on a LAN.
+    pub lag_ms: f64,
     /// Set after HOST GAME: the server runs inside this window.
     hosting: Option<HostedServer>,
+    /// Built on first use (loads the character art).
+    title: Option<Title>,
     pub auto: Auto,
 }
 
@@ -135,7 +143,7 @@ impl App {
         ui.focus = Some(if username.is_empty() { F_USER } else { F_PASS });
         App {
             ui,
-            screen: Screen::Login,
+            screen: Screen::Title,
             conn: None,
             server_addr,
             username,
@@ -157,7 +165,9 @@ impl App {
             udp_rtt_ms: None,
             last_udp_ping: 0.0,
             loss,
+            lag_ms: 0.0,
             hosting: None,
+            title: None,
             auto: Auto::default(),
         }
     }
@@ -405,7 +415,7 @@ impl App {
                         a.set_port(udp_port);
                         a
                     });
-                match udp_addr.map(|a| UdpLink::open(a, self.loss)) {
+                match udp_addr.map(|a| UdpLink::open(a, self.loss, self.lag_ms)) {
                     Some(Ok(link)) => {
                         self.udp = Some(link);
                         self.udp_state = UdpState::Pending {
@@ -578,8 +588,37 @@ impl App {
         }
     }
 
+    /// Go straight to the login screen (dev flags, `--host`).
+    pub fn skip_title(&mut self) {
+        if self.screen == Screen::Title {
+            self.screen = Screen::Login;
+        }
+    }
+
+    fn draw_title(&mut self) {
+        let title = self.title.get_or_insert_with(Title::new);
+        match title.draw(&mut self.ui) {
+            TitleAction::None => {}
+            TitleAction::Play => {
+                self.screen = Screen::Login;
+                self.ui.focus = Some(if self.server_addr.is_empty() { F_SERVER } else { F_USER });
+            }
+            TitleAction::Host => {
+                self.screen = Screen::Login;
+                self.start_hosting();
+            }
+            TitleAction::Quit => std::process::exit(0),
+        }
+    }
+
     pub fn draw(&mut self) {
+        if self.screen == Screen::Title {
+            // The title has its own footer (version + credits).
+            self.draw_title();
+            return;
+        }
         match self.screen {
+            Screen::Title => {}
             Screen::Login => self.draw_login(),
             Screen::Lobby => self.draw_lobby(),
             Screen::Room => self.draw_room(),
@@ -590,7 +629,7 @@ impl App {
     }
 
     fn draw_footer(&self) {
-        let y = screen_height() - 14.0;
+        let y = VH - 14.0;
         if let Some((msg, color)) = &self.status {
             text(msg, 24.0, y, 20.0, *color);
         }
@@ -606,14 +645,17 @@ impl App {
             (UdpState::Ok, Some(rtt)) => format!("  |  udp rtt {rtt:.0} ms"),
             (UdpState::Ok, None) => "  |  udp ok".to_string(),
         };
-        let loss = if self.loss > 0.0 {
+        let mut loss = if self.loss > 0.0 {
             format!("  |  SIMULATED LOSS {:.0}%", self.loss * 100.0)
         } else {
             String::new()
         };
+        if self.lag_ms > 0.0 {
+            loss.push_str(&format!("  |  SIMULATED LAG +{:.0} ms each way", self.lag_ms));
+        }
         let net = format!("{tcp}{udp}{loss}");
         let w = ui::text_width(&net, 18.0);
-        text(&net, screen_width() - w - 24.0, y, 18.0, theme::DIM);
+        text(&net, VW - w - 24.0, y, 18.0, theme::DIM);
     }
 
     fn header(&self, title: &str) {
@@ -622,13 +664,21 @@ impl App {
         if let Some(me) = &self.me {
             let who = format!("{}  #{}", me.username, me.player_id);
             let w = ui::text_width(&who, 22.0);
-            text(&who, screen_width() - w - 24.0, 42.0, 22.0, theme::DIM);
+            text(&who, VW - w - 24.0, 42.0, 22.0, theme::DIM);
         }
-        draw_line(24.0, 64.0, screen_width() - 24.0, 64.0, 1.0, theme::BORDER);
+        draw_line(24.0, 64.0, VW - 24.0, 64.0, 1.0, theme::BORDER);
     }
 
     fn draw_login(&mut self) {
-        let cx = screen_width() / 2.0;
+        let cx = VW / 2.0;
+        if self.conn.is_none()
+            && (self.ui.button(Rect::new(24.0, 24.0, 110.0, 40.0), "< BACK")
+                || is_key_pressed(KeyCode::Escape))
+        {
+            self.screen = Screen::Title;
+            self.status = None;
+            return;
+        }
         text_centered("30 78 47 47", cx, 120.0, 22.0, theme::DIM);
         text_centered("0xGG", cx, 210.0, 110.0, theme::ACCENT);
         text_centered("Last packet standing.", cx, 250.0, 26.0, theme::TEXT);
@@ -742,7 +792,7 @@ impl App {
 
     fn draw_lobby(&mut self) {
         self.header("THE SWITCH  //  lobby");
-        let left = Rect::new(24.0, 84.0, 700.0, screen_height() - 140.0);
+        let left = Rect::new(24.0, 84.0, 700.0, VH - 140.0);
         panel(left);
         text("OPEN PORTS", left.x + 14.0, left.y + 30.0, 22.0, theme::DIM);
 
@@ -816,7 +866,7 @@ impl App {
             self.send(ClientMsg::JoinRoom { room_id });
         }
 
-        let right = Rect::new(748.0, 84.0, screen_width() - 772.0, screen_height() - 200.0);
+        let right = Rect::new(748.0, 84.0, VW - 772.0, VH - 200.0);
         self.draw_chat(right, "LOBBY CHAT");
         self.draw_invite(Rect::new(
             right.x + 152.0,
@@ -839,7 +889,7 @@ impl App {
         self.header(&format!("PORT :{}  //  {}", room.room_id, room.name));
         let my_id = self.me.as_ref().map_or(0, |m| m.player_id);
 
-        let left = Rect::new(24.0, 84.0, 700.0, screen_height() - 140.0);
+        let left = Rect::new(24.0, 84.0, 700.0, VH - 140.0);
         panel(left);
         text(
             &format!(
@@ -929,7 +979,7 @@ impl App {
             }
         }
 
-        let right = Rect::new(748.0, 84.0, screen_width() - 772.0, screen_height() - 208.0);
+        let right = Rect::new(748.0, 84.0, VW - 772.0, VH - 208.0);
         self.draw_chat(right, "PORT CHAT");
         self.draw_invite(Rect::new(right.x, right.y + right.h + 12.0, right.w, 56.0));
     }
@@ -952,7 +1002,7 @@ impl App {
 
     fn draw_results(&mut self) {
         let Some(r) = &self.results else { return };
-        let cx = screen_width() / 2.0;
+        let cx = VW / 2.0;
         let won = r.winner_slot == Some(r.your_slot);
         let winner = r.rankings.iter().find(|x| Some(x.slot) == r.winner_slot);
 
@@ -1034,7 +1084,7 @@ impl App {
             "BACK TO LOBBY"
         };
         if self.ui.button(
-            Rect::new(cx - 110.0, screen_height() - 110.0, 220.0, 46.0),
+            Rect::new(cx - 110.0, VH - 110.0, 220.0, 46.0),
             back_to,
         ) {
             self.results = None;

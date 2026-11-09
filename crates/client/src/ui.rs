@@ -25,16 +25,37 @@ pub mod theme {
     }
 }
 
+/// Font size in real pixels and the scale that maps it back to virtual
+/// pixels: glyphs are rasterized at the output size, so they stay crisp
+/// when the 1280x720 canvas is scaled up (fullscreen).
+fn font_params(size: f32) -> (u16, f32) {
+    let k = crate::screen::scale().max(0.1);
+    let px = (size * k).round().max(1.0);
+    (px as u16, size / px)
+}
+
 pub fn text(s: &str, x: f32, y: f32, size: f32, color: Color) {
-    draw_text(s, x, y, size, color);
+    let (font_size, font_scale) = font_params(size);
+    draw_text_ex(
+        s,
+        x,
+        y,
+        TextParams {
+            font_size,
+            font_scale,
+            color,
+            ..Default::default()
+        },
+    );
 }
 
 pub fn text_width(s: &str, size: f32) -> f32 {
-    measure_text(s, None, size as u16, 1.0).width
+    let (font_size, font_scale) = font_params(size);
+    measure_text(s, None, font_size, font_scale).width
 }
 
 pub fn text_centered(s: &str, cx: f32, y: f32, size: f32, color: Color) {
-    draw_text(s, cx - text_width(s, size) / 2.0, y, size, color);
+    text(s, cx - text_width(s, size) / 2.0, y, size, color);
 }
 
 pub fn panel(r: Rect) {
@@ -56,7 +77,7 @@ pub struct Ui {
 
 impl Ui {
     pub fn begin_frame(&mut self) {
-        self.mouse = mouse_position().into();
+        self.mouse = crate::screen::mouse();
         self.clicked = is_mouse_button_pressed(MouseButton::Left);
         self.hit_widget = false;
         self.typed.clear();

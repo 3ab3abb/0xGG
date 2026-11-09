@@ -4,21 +4,14 @@
 Nothing to install. Unzip the folder anywhere (Desktop is fine) and keep the files together.
 
 
-1. CHARACTER ART (once)
------------------------
-The player sprites can't be published, so they are shared privately in the team.
-Copy the 6 Seeker_Void_*.png files into:   assets\seeker\
-No sprites? The game still works, players are just drawn as plain packets.
-
-
-2. FIRST LAUNCH WARNINGS (normal, the game isn't code-signed)
+1. FIRST LAUNCH WARNINGS (normal, the game isn't code-signed)
 -------------------------------------------------------------
 Windows "Windows protected your PC":  click  More info  ->  Run anyway.
 macOS "cannot be opened":             right-click the .command file -> Open -> Open,
                                       or once in Terminal:  xattr -dr com.apple.quarantine <this folder>
 
 
-3. PLAYING
+2. PLAYING
 ----------
 Everyone double-clicks PLAY.bat (Windows) or play.command (macOS).
 
@@ -38,7 +31,7 @@ doesn't play; players type the IP it prints.
 If nobody can connect, run OPEN-FIREWALL.bat once on the host (Windows).
 
 
-4. IF IT DOESN'T CONNECT
+3. IF IT DOESN'T CONNECT
 ------------------------
 - Everyone must be on the SAME Wi-Fi or hotspot as the server.
 - Use the server's LAN IP (192.168.x.x / 10.x.x.x / 172.x.x.x), never 127.0.0.1.
@@ -49,5 +42,6 @@ If nobody can connect, run OPEN-FIREWALL.bat once on the host (Windows).
 
 Controls: A/D move, SPACE jump, W aim up, S+SPACE drop through platform,
           J shoot, K pick up / throw, ESC forfeit   (or arrows + Z/X/C)
+          F11 (or Alt+Enter) fullscreen
 
 Art credits: see CREDITS.md

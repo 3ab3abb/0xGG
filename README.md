@@ -15,7 +15,8 @@ Built in Rust with raw `std::net` TCP + UDP sockets for the CS411 Computer Netwo
 | 1. TCP: register/login, lobby, rooms, ready, chat, match start/end, disconnect handling | ✅ done |
 | 2. UDP game loop: inputs, snapshots, physics, stomps/pits, rounds, reliable kill events | ✅ done |
 | 3. Weapons (Ping Pistol, Broadcast Shotgun, Fork Bomb, Firewall, Checksum Blade), pickup/throw/stun, spawners | ✅ done |
-| 4. Prediction, interpolation, lag compensation | ⏳ next |
+| 4. Client-side prediction + reconciliation, entity interpolation | ✅ done |
+| 4b. Server lag compensation (rewind hitscan to `view_tick`) | ⏳ next |
 | 5. Cross-network deploy (bonus) | |
 
 ## Download (no Rust needed)
@@ -30,7 +31,7 @@ To publish a new build: `git tag v0.1.1 && git push origin v0.1.1` (GitHub Actio
 ### Requirements
 
 - Rust 1.80+ (`rustup` from https://rustup.rs)
-- Optional: the character sprites (not redistributable, so not in git). Copy the free Seeker_Lite sheets into `assets/seeker/`, see [`assets/CREDITS.md`](assets/CREDITS.md). Without them players are drawn as plain packets.
+- Optional: the character sprites (their license forbids sharing the files, so they are not in git). Copy the free Seeker_Lite sheets into `assets/seeker/` and they are compiled into the client, see [`assets/CREDITS.md`](assets/CREDITS.md). Without them players are drawn as plain packets. Release zips already include them inside the game.
 
 ### Run
 
@@ -66,10 +67,13 @@ Then: register → create a port (room) → others join → everyone presses **R
 | Shoot / use | `J` | `X` |
 | Pick up / throw | `K` | `C` |
 | Forfeit | `Esc` | `Esc` |
+| Fullscreen | `F11` or `Alt+Enter` | |
+
+The window can be resized freely and `--fullscreen` starts in fullscreen: the 1280x720 layout scales to fit (letterboxed), with text rendered at native resolution.
 
 One hit drops a packet. Grab weapons from the blue spawner pads: **Ping Pistol** (hitscan), **Broadcast Shotgun** (spread, recoil), **Fork Bomb** (bounces, explodes, forks into two), **Firewall** (blocks shots for 5 s), **Checksum Blade** (melee, reflects shots mid-swing). Throw an empty gun to stun. Landing on a header or falling into a pit also drops you. Last packet standing wins the round; first to 5 rounds wins.
 
-The footer shows TCP and UDP round-trip times; in a match the bottom-left shows snapshot rate, measured loss and how many inputs are still unacknowledged.
+The footer shows TCP and UDP round-trip times; in a match the bottom-left shows snapshot rate, measured loss, how many inputs are still unacknowledged and the last prediction correction. **F1** toggles client-side prediction, **F2** toggles interpolation (try both with `--lag 75`).
 
 ### Bots
 
@@ -83,6 +87,7 @@ One-command solo practice (hosts its own server): `cargo run --release -p gg-cli
 |---|---|
 | `--host` | Start hosting at launch (same as the HOST GAME button) |
 | `--loss 20` | Drop 20% of UDP packets in each direction (shows the game survives loss) |
+| `--lag 75` | Delay UDP packets 75 ms each way (150 ms RTT): shows prediction/interpolation on a LAN |
 | `--login name:pass` | Register or log in automatically |
 | `--autojoin` | Join the first open port (or create one) and ready up |
 | `--bot` | This client plays itself with the bot brain |

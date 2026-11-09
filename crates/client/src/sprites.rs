@@ -4,8 +4,10 @@
 //! - `assets/sprites/*.png`: weapons and effects from the CC0 "Free 2D Animated
 //!   Vector Game Character Sprites" pack, embedded in the binary.
 //! - `assets/seeker/`: the Seeker_Lite character sheets (Primitive Pixels). Their
-//!   license forbids redistributing the art, so they are gitignored and loaded at
-//!   runtime when present. Without them players are drawn as procedural packets.
+//!   license allows using the art in the game but not sharing the files, so they
+//!   are gitignored and compiled into the binary when present at build time
+//!   (`build.rs`). A local `assets/seeker/` folder overrides them at runtime.
+//!   Without either, players are drawn as procedural packets.
 
 use std::path::{Path, PathBuf};
 
@@ -92,14 +94,42 @@ fn png(bytes: &[u8]) -> Texture2D {
     Texture2D::from_file_with_format(bytes, Some(ImageFormat::Png))
 }
 
+mod embedded {
+    include!(concat!(env!("OUT_DIR"), "/embedded_art.rs"));
+}
+
+/// Where the Seeker sheets come from.
+enum SeekerSource {
+    /// A folder on disk (dev override, or a build without embedded art).
+    Dir(PathBuf),
+    /// Compiled into the binary by `build.rs`.
+    Embedded(&'static [(&'static str, &'static [u8])]),
+}
+
+impl SeekerSource {
+    fn find() -> Option<SeekerSource> {
+        find_seeker_dir()
+            .map(SeekerSource::Dir)
+            .or(embedded::SEEKER.map(SeekerSource::Embedded))
+    }
+
+    fn image(&self, name: &str) -> Option<Image> {
+        let bytes: std::borrow::Cow<[u8]> = match self {
+            SeekerSource::Dir(dir) => std::fs::read(dir.join(name)).ok()?.into(),
+            SeekerSource::Embedded(files) => files.iter().find(|(n, _)| *n == name)?.1.into(),
+        };
+        Image::from_file_with_format(&bytes, Some(ImageFormat::Png)).ok()
+    }
+}
+
 impl Art {
     pub fn load(slot_color: impl Fn(u8) -> Color) -> Art {
-        let seeker = find_seeker_dir().and_then(|dir| {
+        let seeker = SeekerSource::find().and_then(|src| {
             let sheets = (1..=3u8)
-                .map(|slot| load_seeker(&dir, slot_color(slot), slot == 3))
+                .map(|slot| load_seeker(&src, slot_color(slot), slot == 3))
                 .collect::<Option<Vec<_>>>();
             if sheets.is_none() {
-                eprintln!("seeker sprites in {} are incomplete; using packets", dir.display());
+                eprintln!("seeker sprites are incomplete; using packets");
             }
             sheets
         });
@@ -169,18 +199,13 @@ fn find_seeker_dir() -> Option<PathBuf> {
         .find(|d| d.join("Seeker_Void_Idle_30x30_24f.png").is_file())
 }
 
-fn load_image(dir: &Path, name: &str) -> Option<Image> {
-    let bytes = std::fs::read(dir.join(name)).ok()?;
-    Image::from_file_with_format(&bytes, Some(ImageFormat::Png)).ok()
-}
-
-fn load_seeker(dir: &Path, target: Color, white: bool) -> Option<Seeker> {
+fn load_seeker(src: &SeekerSource, target: Color, white: bool) -> Option<Seeker> {
     let sheet = |name: &str, fw, fh, pivot| {
-        let mut img = load_image(dir, name)?;
+        let mut img = src.image(name)?;
         recolor(&mut img, target, white);
         Some(Sheet::from_image(&img, fw, fh, pivot))
     };
-    let mut attack = load_image(dir, "Seeker_Void_Attack1_90x50_8f.png")?;
+    let mut attack = src.image("Seeker_Void_Attack1_90x50_8f.png")?;
     recolor(&mut attack, target, white);
     let (body, slash) = split_slash(&attack, 90);
     Some(Seeker {

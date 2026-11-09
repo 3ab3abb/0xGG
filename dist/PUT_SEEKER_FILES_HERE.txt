@@ -1,2 +1,0 @@
-Copy the 6 Seeker_Void_*.png sprite sheets (shared privately in the team) into this folder.
-See ..\..\README.txt

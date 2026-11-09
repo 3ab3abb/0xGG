@@ -7,6 +7,7 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::constants::PROTOCOL_VERSION;
+use crate::game::PlayerSim;
 use crate::weapons::Weapon;
 
 pub const MAGIC: [u8; 2] = *b"GG";
@@ -73,6 +74,12 @@ pub struct Snapshot {
     pub firewalls: Vec<FirewallState>,
     /// Reliable events this client has not acknowledged yet (§5.4).
     pub events: Vec<Event>,
+    /// The receiving client's own full physics state (including hidden
+    /// timers: coyote, jump buffer, drop-through, stun, previous buttons),
+    /// right after applying `ack_input_seq`. The client resets its
+    /// prediction to this and replays newer inputs (reconciliation).
+    /// `None` while the client is dead or not in the match.
+    pub you: Option<PlayerSim>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,6 +223,19 @@ mod tests {
             round: 4,
             phase: RoundPhase::Playing { ms_left: 60_000 },
             scores: vec![(1, 4), (2, 3), (3, 4)],
+            you: Some(PlayerSim {
+                x: 312.5,
+                y: 200.25,
+                vx: -150.0,
+                vy: 480.0,
+                facing_right: true,
+                grounded: true,
+                coyote: 6,
+                jump_buffer: 6,
+                drop_timer: 10,
+                prev_buttons: 0x7f,
+                stun: 40,
+            }),
             players: (1..=3)
                 .map(|slot| PlayerState {
                     slot,
