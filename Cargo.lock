@@ -349,7 +349,7 @@ dependencies = [
 
 [[package]]
 name = "gg-client"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "gg-server",
  "gg-shared",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "gg-server"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "crossbeam-channel",
  "env_logger",
@@ -372,7 +372,7 @@ dependencies = [
 
 [[package]]
 name = "gg-shared"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "postcard",
  "serde",
