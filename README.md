@@ -20,8 +20,8 @@ Built in Rust with raw `std::net` TCP + UDP sockets for the CS411 Computer Netwo
 
 ## Download (no Rust needed)
 
-Grab the zip for your OS from [Releases](https://github.com/3ab3abb/0xGG/releases/latest), unzip it and read its `README.txt`:
-the server machine double-clicks `HOST.bat` (`host.command` on macOS), every player double-clicks `PLAY.bat` (`play.command`) and types the server IP.
+Grab the zip for your OS from [Releases](https://github.com/3ab3abb/0xGG/releases/latest), unzip it and read its `README.txt`.
+Everyone double-clicks `PLAY.bat` (`play.command` on macOS). One player presses **HOST GAME** and sends the IP it shows; the others type it in the *host's IP* box.
 
 To publish a new build: `git tag v0.1.1 && git push origin v0.1.1` (GitHub Actions tests, builds and attaches the zips).
 
@@ -34,15 +34,24 @@ To publish a new build: `git tag v0.1.1 && git push origin v0.1.1` (GitHub Actio
 
 ### Run
 
-```bash
-# Server (machine 1). Listens on TCP and UDP port 7777.
-cargo run --release -p gg-server -- --bind 0.0.0.0:7777
+**Easiest: host from the game.** Everyone runs the client. One player presses **HOST GAME** on the login screen: the
+server starts inside their window (same code as `gg-server`, on `0.0.0.0:7777`) and their LAN IP is shown on the
+login screen, in the lobby and in the port, with a **COPY** button. The others type that IP in the *host's IP* box
+(remembered in `last_server.txt`). Closing the host's window stops the server.
 
-# Clients (machines 2-4)
-cargo run --release -p gg-client -- --server <SERVER_IP>
+```bash
+cargo run --release -p gg-client              # then HOST GAME, or type the host's IP
+cargo run --release -p gg-client -- --host    # press HOST GAME at startup
 ```
 
-Find the server's LAN IP with `ipconfig getifaddr en0` (macOS), `hostname -I` (Linux) or `ipconfig` (Windows). Allow port **7777 TCP and UDP** through the server machine's firewall.
+**Dedicated server** (a machine that doesn't play, the "1 server + 3 clients" setup):
+
+```bash
+cargo run --release -p gg-server -- --bind 0.0.0.0:7777
+cargo run --release -p gg-client -- --server <SERVER_IP>   # on each player machine
+```
+
+Allow port **7777 TCP and UDP** through the host's firewall. Everyone must be on the same Wi-Fi / hotspot.
 
 Then: register → create a port (room) → others join → everyone presses **READY** → match starts when the port is full (3/3), or the host presses **START** with 2.
 
@@ -66,12 +75,13 @@ The footer shows TCP and UDP round-trip times; in a match the bottom-left shows 
 
 Alone? In a port, the host can press **+ ADD BOT** (up to 2) and **− REMOVE BOT**. Bots are real network clients the server spawns on localhost: they log in, do the UDP handshake and play through the same protocol as you. They rematch after each match and leave when the last human does.
 
-One-command solo practice: `cargo run --release -p gg-client -- --login you:pw123 --add-bots 2`
+One-command solo practice (hosts its own server): `cargo run --release -p gg-client -- --login you:pw123 --add-bots 2`
 
 ### Demo / test flags (client)
 
 | Flag | Effect |
 |---|---|
+| `--host` | Start hosting at launch (same as the HOST GAME button) |
 | `--loss 20` | Drop 20% of UDP packets in each direction (shows the game survives loss) |
 | `--login name:pass` | Register or log in automatically |
 | `--autojoin` | Join the first open port (or create one) and ready up |
@@ -103,7 +113,7 @@ cargo test --workspace
 ```
 crates/shared   protocol messages, TCP framing, UDP packets, physics simulation, maps
 crates/server   accept loop, per-connection reader/writer threads, lobby thread, UDP router, 60 Hz game loop per match, account store
-crates/client   macroquad app: login, lobby, room, game view, results (0xGG / 0xFF)
+crates/client   macroquad app: login (+ HOST GAME, embeds the server), lobby, room, game view, results (0xGG / 0xFF)
 assets/maps     ASCII maps (compiled into both binaries)
 assets/sprites  CC0 weapon/effect sprites (compiled into the client)
 assets/seeker   character sheets, loaded at runtime if present (gitignored, see assets/CREDITS.md)

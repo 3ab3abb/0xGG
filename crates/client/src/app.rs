@@ -11,6 +11,7 @@ use gg_shared::game::builtin_map;
 use gg_shared::udp::{ClientPacket, ServerPacket};
 
 use crate::game_view::GameView;
+use crate::host::{self, HostedServer};
 use crate::net::{now_ms, Connection, NetEvent, UdpLink};
 use crate::ui::{self, panel, text, text_centered, theme, Ui};
 
@@ -104,6 +105,8 @@ pub struct App {
     last_udp_ping: f64,
     /// Simulated UDP packet loss (0.0-1.0), from `--loss`.
     loss: f32,
+    /// Set after HOST GAME: the server runs inside this window.
+    hosting: Option<HostedServer>,
     pub auto: Auto,
 }
 
@@ -118,6 +121,7 @@ pub struct Auto {
     pub bot: bool,
     /// Create a room and fill it with N server bots (`--add-bots N`).
     pub add_bots: u8,
+    login_sent: bool,
     bots_sent: bool,
     start_sent: bool,
     lobby_since: Option<f64>,
@@ -153,7 +157,67 @@ impl App {
             udp_rtt_ms: None,
             last_udp_ping: 0.0,
             loss,
+            hosting: None,
             auto: Auto::default(),
+        }
+    }
+
+    // -------------------------------------------------------------- hosting
+
+    /// HOST GAME: run the server in this window and point our client at it.
+    pub fn start_hosting(&mut self) {
+        if self.hosting.is_some() {
+            return;
+        }
+        match HostedServer::start() {
+            Ok(h) => {
+                let msg = match (h.lan_ip, h.embedded) {
+                    (Some(ip), true) => format!(
+                        "hosting! friends type {ip}  -  keep this window open. now register / log in."
+                    ),
+                    (Some(ip), false) => format!(
+                        "a server is already running on this computer - joining it. friends type {ip}"
+                    ),
+                    (None, _) => "hosting, but no network found: join a Wi-Fi or hotspot so friends can connect".to_string(),
+                };
+                self.set_status(msg, theme::ACCENT);
+                self.server_addr = "127.0.0.1".into();
+                self.hosting = Some(h);
+                self.ui.focus = Some(F_USER);
+            }
+            Err(e) => self.set_status(e, theme::ERROR),
+        }
+    }
+
+    /// What other players type to reach the server we're on.
+    fn invite_addr(&self) -> Option<String> {
+        match &self.hosting {
+            Some(h) => h.lan_ip.map(|ip| ip.to_string()),
+            None => {
+                let a = host::short_addr(&self.server_addr);
+                let local = a.is_empty() || a == "127.0.0.1" || a == "localhost";
+                (!local).then_some(a)
+            }
+        }
+    }
+
+    /// "FRIENDS JOIN WITH <ip>  [COPY]" strip, shown in the lobby and the port.
+    fn draw_invite(&mut self, r: Rect) {
+        panel(r);
+        let (label, value, color) = match (self.invite_addr(), self.hosting.is_some()) {
+            (Some(ip), true) => ("YOU ARE HOSTING  -  FRIENDS TYPE", ip, theme::ACCENT),
+            (Some(ip), false) => ("SERVER  -  FRIENDS TYPE", ip, theme::ACCENT),
+            (None, _) => ("NO LAN IP", "join a Wi-Fi / hotspot".to_string(), theme::WARN),
+        };
+        text(label, r.x + 12.0, r.y + 16.0, 15.0, theme::DIM);
+        text(&value, r.x + 12.0, r.y + r.h - 9.0, 24.0, color);
+        if self.invite_addr().is_some()
+            && self
+                .ui
+                .button(Rect::new(r.x + r.w - 86.0, r.y + 7.0, 76.0, r.h - 14.0), "COPY")
+        {
+            macroquad::miniquad::window::clipboard_set(&value);
+            self.set_status(format!("copied {value} - send it to your friends"), theme::DIM);
         }
     }
 
@@ -173,6 +237,14 @@ impl App {
     /// Connect on demand (first Login/Register click), then send.
     fn connect_and_send(&mut self, msg: ClientMsg) {
         if self.conn.is_none() {
+            if self.server_addr.trim().is_empty() {
+                self.set_status(
+                    "type the host's IP, or press HOST GAME to host on this computer",
+                    theme::WARN,
+                );
+                self.ui.focus = Some(F_SERVER);
+                return;
+            }
             self.set_status(
                 format!("connecting to {} ...", self.server_addr),
                 theme::DIM,
@@ -205,6 +277,10 @@ impl App {
     }
 
     pub fn poll_network(&mut self) {
+        if let Some(why) = self.hosting.as_mut().and_then(|h| h.poll_died()) {
+            self.hosting = None;
+            self.connection_lost(format!("hosted {why}"));
+        }
         let events = match &self.conn {
             Some(c) => c.poll(),
             None => return,
@@ -318,6 +394,9 @@ impl App {
                 udp_port,
             } => {
                 self.token = token;
+                if self.hosting.is_none() {
+                    host::save_last_server(&self.server_addr);
+                }
                 let udp_addr = self
                     .conn
                     .as_ref()
@@ -445,7 +524,8 @@ impl App {
     /// Drive `--login` / `--autojoin`. Called once per frame.
     pub fn run_auto(&mut self) {
         if let Some((username, password)) = self.auto.login.clone() {
-            if self.screen == Screen::Login && self.conn.is_none() && self.status.is_none() {
+            if self.screen == Screen::Login && self.conn.is_none() && !self.auto.login_sent {
+                self.auto.login_sent = true;
                 self.username = username.clone();
                 self.connect_and_send(ClientMsg::Register { username, password });
             }
@@ -555,15 +635,34 @@ impl App {
 
         let w = 360.0;
         let x = cx - w / 2.0;
-        self.ui.text_field(
-            F_SERVER,
-            Rect::new(x, 320.0, w, 42.0),
-            "server",
-            &mut self.server_addr,
-            false,
-            64,
-            Some(F_USER),
-        );
+        let server_row = Rect::new(x, 320.0, w - 132.0, 42.0);
+        if let Some(h) = &self.hosting {
+            // Hosting: the address is fixed (us), show what friends need instead.
+            panel(server_row);
+            let ip = h.lan_ip.map_or("no LAN".to_string(), |ip| ip.to_string());
+            text("hosting  -  friends type this IP", x, 313.0, 18.0, theme::DIM);
+            text(&ip, x + 10.0, 348.0, 22.0, theme::ACCENT);
+        } else {
+            self.ui.text_field(
+                F_SERVER,
+                server_row,
+                "host's IP  (or host it yourself ->)",
+                &mut self.server_addr,
+                false,
+                64,
+                Some(F_USER),
+            );
+            if self.server_addr.is_empty() && self.ui.focus != Some(F_SERVER) {
+                text("e.g. 192.168.1.20", x + 10.0, 348.0, 22.0, theme::DIM);
+            }
+        }
+        let host_btn = Rect::new(x + w - 120.0, 320.0, 120.0, 42.0);
+        if self.hosting.is_none() && self.ui.button(host_btn, "HOST GAME") {
+            self.start_hosting();
+        } else if self.hosting.is_some() {
+            panel(host_btn);
+            text_centered("HOSTING", host_btn.x + 60.0, 348.0, 22.0, theme::ACCENT);
+        }
         let enter_user = self.ui.text_field(
             F_USER,
             Rect::new(x, 395.0, w, 42.0),
@@ -719,6 +818,12 @@ impl App {
 
         let right = Rect::new(748.0, 84.0, screen_width() - 772.0, screen_height() - 200.0);
         self.draw_chat(right, "LOBBY CHAT");
+        self.draw_invite(Rect::new(
+            right.x + 152.0,
+            right.y + right.h + 12.0,
+            right.w - 152.0,
+            56.0,
+        ));
         if self.ui.button(
             Rect::new(right.x, right.y + right.h + 12.0, 140.0, 40.0),
             "LOGOUT",
@@ -824,8 +929,9 @@ impl App {
             }
         }
 
-        let right = Rect::new(748.0, 84.0, screen_width() - 772.0, screen_height() - 140.0);
+        let right = Rect::new(748.0, 84.0, screen_width() - 772.0, screen_height() - 208.0);
         self.draw_chat(right, "PORT CHAT");
+        self.draw_invite(Rect::new(right.x, right.y + right.h + 12.0, right.w, 56.0));
     }
 
     fn draw_match(&mut self) {

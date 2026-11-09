@@ -20,16 +20,22 @@ macOS "cannot be opened":             right-click the .command file -> Open -> O
 
 3. PLAYING
 ----------
-One machine is the SERVER:
-  Windows: double-click HOST.bat      macOS: double-click host.command
-  It prints the machine's IP. If a firewall popup appears, allow it
-  (on Windows tick BOTH Private and Public).
-  If nobody can connect, run OPEN-FIREWALL.bat once (Windows, host only).
+Everyone double-clicks PLAY.bat (Windows) or play.command (macOS).
 
-Every player:
-  Windows: double-click PLAY.bat      macOS: double-click play.command
-  Type the server's IP (e.g. 192.168.1.20). It is remembered for next time.
-  Register a name + password, create or join a port (room), press READY.
+ONE player hosts:
+  Press HOST GAME on the login screen. Your IP appears (e.g. 192.168.1.20):
+  send it to the others (the COPY button in the lobby / port puts it on your clipboard).
+  If a firewall popup appears, allow it (on Windows tick BOTH Private and Public).
+  Keep your window open: closing it stops the server for everyone.
+
+The others:
+  Type the host's IP in the "host's IP" box (it is remembered for next time).
+
+Then everyone: register a name + password, create or join a port (room), press READY.
+
+Dedicated server instead (optional): run HOST.bat / host.command on a machine that
+doesn't play; players type the IP it prints.
+If nobody can connect, run OPEN-FIREWALL.bat once on the host (Windows).
 
 
 4. IF IT DOESN'T CONNECT

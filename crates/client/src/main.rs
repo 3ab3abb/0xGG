@@ -1,17 +1,23 @@
 //! 0xGG client.
 //!
-//! usage: gg-client [--server HOST[:PORT]] [--user NAME] [--loss PERCENT]
+//! usage: gg-client [--server HOST[:PORT]] [--host] [--user NAME] [--loss PERCENT]
 //!                  [--login NAME:PASS] [--autojoin] [--bot] [--add-bots N]
+//!
+//! Without flags the login screen asks for the host's IP (prefilled with the
+//! last one used), or HOST GAME runs the server inside this window.
+//! `--host` presses HOST GAME at startup.
 //!
 //! `--loss 20` drops 20% of UDP packets in each direction (demo of loss tolerance).
 //! `--login` registers-or-logs-in automatically; `--autojoin` joins the first
 //! open room (or creates one) and readies up. Handy for local 3-client tests.
 //! `--bot` plays as the sparring bot. `--add-bots N` (1-2) creates a port,
-//! asks the server for N bots and starts: one-command solo practice.
+//! asks the server for N bots and starts: one-command solo practice (hosts
+//! its own server unless `--server` is given).
 //! `GG_SCREENSHOT=out.png:SECONDS` saves the window to a PNG after SECONDS and exits.
 
 mod app;
 mod game_view;
+mod host;
 mod net;
 mod sprites;
 mod ui;
@@ -33,14 +39,16 @@ fn window_conf() -> Conf {
 
 #[macroquad::main(window_conf)]
 async fn main() {
-    let mut server = "127.0.0.1:7777".to_string();
+    let mut server: Option<String> = None;
+    let mut host = false;
     let mut user = String::new();
     let mut loss = 0.0f32;
     let mut auto = app::Auto::default();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--server" => server = args.next().unwrap_or(server),
+            "--server" => server = args.next(),
+            "--host" => host = true,
             "--user" => user = args.next().unwrap_or_default(),
             "--loss" => {
                 loss = args
@@ -71,8 +79,24 @@ async fn main() {
         Some((path.to_string(), secs.parse().ok()?))
     });
 
+    // Solo practice with bots needs a server: host one unless told where to go.
+    host |= auto.add_bots > 0 && server.is_none();
+    // Dev flags (--login/--autojoin) default to a server on this machine;
+    // a normal launch prefills the last server the player joined.
+    let dev = auto.login.is_some() || auto.join;
+    let server = server.unwrap_or_else(|| {
+        if dev {
+            "127.0.0.1".to_string()
+        } else {
+            host::load_last_server().unwrap_or_default()
+        }
+    });
+
     let mut app = app::App::new(server, user, loss);
     app.auto = auto;
+    if host {
+        app.start_hosting();
+    }
     loop {
         app.poll_network();
         app.run_auto();

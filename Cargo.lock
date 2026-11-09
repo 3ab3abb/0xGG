@@ -351,6 +351,7 @@ dependencies = [
 name = "gg-client"
 version = "0.1.0"
 dependencies = [
+ "gg-server",
  "gg-shared",
  "macroquad",
 ]
