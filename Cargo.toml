@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/shared", "crates/server", "crates/client"]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 
 # Optimize dependencies even in debug builds (keeps macroquad smooth while we iterate).

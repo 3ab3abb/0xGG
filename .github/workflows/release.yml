@@ -125,7 +125,11 @@ jobs:
             *.zip
             *.tar.gz
           body: |
-            **Everyone just opens the game.** One player presses **HOST GAME** on the login screen and sends the IP it shows (COPY button); the others type it in the *host's IP* box. `HOST.bat` / `host.command` still run a dedicated server.
+            **Online:** open the game and keep the **CLOUD** tab: it connects to the public server `0xgg.duckdns.org` from any network and shows whether it's up and your ping.
+
+            **LAN:** pick the **LAN** tab. One player presses **HOST GAME** and sends the IP it shows (COPY button); the others type it in the *host's IP* box. `HOST.bat` / `host.command` still run a dedicated server.
+
+            **Linux server:** `0xGG-server-linux-x64.tar.gz` is a single static `gg-server` binary for hosting on a cloud VM.
 
             **Windows:** `0xGG-windows-x64.zip`, unzip, double-click `PLAY.bat`. Allow the firewall popup on the host (tick Private and Public).
 

@@ -15,7 +15,13 @@ macOS "cannot be opened":             right-click the .command file -> Open -> O
 ----------
 Everyone double-clicks PLAY.bat (Windows) or play.command (macOS).
 
-ONE player hosts:
+ONLINE (any network, nobody hosts):
+  Keep the CLOUD tab selected on the login screen. A green dot means the
+  public server is up (it also shows your ping). Register, log in, play.
+  Works from home Wi-Fi, campus, a phone hotspot... no IP to type.
+  Red "offline": the cloud server isn't running right now -> use LAN.
+
+LAN (same Wi-Fi / hotspot): click the LAN tab. ONE player hosts:
   Press HOST GAME on the login screen. Your IP appears (e.g. 192.168.1.20):
   send it to the others (the COPY button in the lobby / port puts it on your clipboard).
   If a firewall popup appears, allow it (on Windows tick BOTH Private and Public).
@@ -33,7 +39,8 @@ If nobody can connect, run OPEN-FIREWALL.bat once on the host (Windows).
 
 3. IF IT DOESN'T CONNECT
 ------------------------
-- Everyone must be on the SAME Wi-Fi or hotspot as the server.
+- CLOUD tab: only needs internet. If it says offline, the server is stopped.
+- LAN tab: everyone must be on the SAME Wi-Fi or hotspot as the server.
 - Use the server's LAN IP (192.168.x.x / 10.x.x.x / 172.x.x.x), never 127.0.0.1.
 - Campus Wi-Fi often blocks laptops from talking to each other.
   Fix: turn on a phone hotspot and connect all 4 laptops to it.
