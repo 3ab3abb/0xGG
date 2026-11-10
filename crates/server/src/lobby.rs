@@ -255,6 +255,7 @@ impl Lobby {
         let _ = self.udp_ctl.send(UdpCtl::Register {
             token,
             label: format!("{conn}({username})"),
+            bot: gg_shared::bot::is_bot_name(&username),
         });
         info!(
             "{conn}: logged in as '{username}' (player {player_id}) from {}",

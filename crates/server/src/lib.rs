@@ -48,7 +48,7 @@ pub fn run(listener: TcpListener, config: Config) -> io::Result<()> {
     let udp_socket = UdpSocket::bind(listener.local_addr()?)?;
     let (udp_ctl_tx, udp_ctl_rx) = crossbeam_channel::unbounded();
     let game_socket = udp_socket.try_clone()?;
-    udp::spawn(udp_socket, udp_ctl_rx)?;
+    udp::spawn(udp_socket, udp_ctl_rx, config.server_name.clone())?;
 
     // Bots connect back to this server over localhost (or the bound IP).
     let mut bot_addr = listener.local_addr()?;

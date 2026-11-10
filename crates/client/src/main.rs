@@ -19,12 +19,15 @@
 //! `--fullscreen` starts fullscreen; F11 or Alt+Enter toggles it any time.
 //! The window can be resized freely: the UI scales to fit (see `screen`).
 //! `GG_SCREENSHOT=out.png:SECONDS` saves the window to a PNG after SECONDS and exits.
+//! `--server` skips the title screen; `--server 0xgg.duckdns.org` opens the
+//! CLOUD tab. `GG_CLOUD_SERVER=host[:port]` replaces the CLOUD tab's server.
 
 mod app;
 mod game_view;
 mod host;
 mod net;
 mod netcode;
+mod probe;
 mod screen;
 mod sprites;
 mod title;
@@ -103,6 +106,8 @@ async fn main() {
     // Dev flags (--login/--autojoin) default to a server on this machine;
     // a normal launch prefills the last server the player joined.
     let dev = auto.login.is_some() || auto.join;
+    // Told where to connect: go straight to the login screen.
+    let explicit_server = server.is_some();
     let server = server.unwrap_or_else(|| {
         if dev {
             "127.0.0.1".to_string()
@@ -114,7 +119,7 @@ async fn main() {
     let mut app = app::App::new(server, user, loss);
     app.auto = auto;
     app.lag_ms = lag_ms;
-    if dev || host {
+    if dev || host || explicit_server {
         app.skip_title();
     }
     if host {

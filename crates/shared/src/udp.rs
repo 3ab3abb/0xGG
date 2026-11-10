@@ -47,13 +47,56 @@ pub enum ClientPacket {
         token: u64,
         client_time_ms: u32,
     },
+    /// Server-browser query, the only packet accepted without a login token.
+    /// Anti-amplification: the request must be at least as large as the
+    /// reply, so the server can't be abused to flood a spoofed address with
+    /// more bytes than the attacker sent. `pad` fills it to
+    /// `STATUS_REQUEST_LEN`.
+    Status {
+        nonce: u32,
+        pad: Vec<u8>,
+    },
+}
+
+/// Size a `Status` request is padded to (bytes on the wire).
+pub const STATUS_REQUEST_LEN: usize = 96;
+/// Longest server name sent in a `StatusReply`.
+pub const STATUS_NAME_MAX: usize = 32;
+
+impl ClientPacket {
+    /// A `Status` request padded to `STATUS_REQUEST_LEN` bytes when encoded.
+    pub fn status_request(nonce: u32) -> ClientPacket {
+        let bare = encode(&ClientPacket::Status {
+            nonce,
+            pad: Vec::new(),
+        })
+        .map_or(0, |b| b.len());
+        // `bare` already counts the pad's 1-byte length prefix (a varint,
+        // still 1 byte for pads < 128).
+        let pad = STATUS_REQUEST_LEN.saturating_sub(bare);
+        ClientPacket::Status {
+            nonce,
+            pad: vec![0; pad],
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ServerPacket {
     HelloAck,
     Snapshot(Snapshot),
-    Pong { client_time_ms: u32 },
+    Pong {
+        client_time_ms: u32,
+    },
+    /// Answer to `ClientPacket::Status` (server browser: name, load, RTT).
+    StatusReply {
+        nonce: u32,
+        name: String,
+        /// Logged-in humans (bots not counted).
+        online: u16,
+        /// Of those, how many are in a running match.
+        in_game: u16,
+    },
 }
 
 /// Full world state. Never a delta, so any single snapshot is enough to
@@ -317,6 +360,32 @@ mod tests {
             "snapshot is {} bytes",
             bytes.len()
         );
+    }
+
+    #[test]
+    fn status_request_is_padded_and_outweighs_the_reply() {
+        let req = encode(&ClientPacket::status_request(u32::MAX)).unwrap();
+        assert_eq!(req.len(), STATUS_REQUEST_LEN);
+        let reply = encode(&ServerPacket::StatusReply {
+            nonce: u32::MAX,
+            name: "x".repeat(STATUS_NAME_MAX),
+            online: u16::MAX,
+            in_game: u16::MAX,
+        })
+        .unwrap();
+        assert!(
+            reply.len() <= req.len(),
+            "reply {} > request {}",
+            reply.len(),
+            req.len()
+        );
+        assert!(matches!(
+            decode::<ClientPacket>(&req),
+            Some(ClientPacket::Status {
+                nonce: u32::MAX,
+                ..
+            })
+        ));
     }
 
     #[test]

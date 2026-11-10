@@ -115,6 +115,55 @@ fn unknown_token_gets_no_reply() {
 }
 
 #[test]
+fn status_query_answers_only_padded_requests() {
+    let server = start_server();
+    let _p = Player::login(server, "alice");
+    let _bob = Player::login(server, "bob");
+    let q = UdpSocket::bind("127.0.0.1:0").unwrap();
+    q.connect(server).unwrap();
+    q.set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    let mut buf = [0u8; 2048];
+
+    // Too small to be worth answering: an amplification attempt.
+    q.send(
+        &udp::encode(&ClientPacket::Status {
+            nonce: 1,
+            pad: vec![],
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        q.recv(&mut buf).is_err(),
+        "answered an unpadded status query"
+    );
+
+    let req = udp::encode(&ClientPacket::status_request(7)).unwrap();
+    let mut reply = None;
+    for _ in 0..10 {
+        q.send(&req).unwrap();
+        if let Ok(n) = q.recv(&mut buf) {
+            assert!(n <= req.len(), "reply larger than request");
+            reply = udp::decode::<ServerPacket>(&buf[..n]);
+            break;
+        }
+    }
+    match reply {
+        Some(ServerPacket::StatusReply {
+            nonce,
+            name,
+            online,
+            in_game,
+        }) => {
+            assert_eq!((nonce, name.as_str()), (7, "test"));
+            assert_eq!((online, in_game), (2, 0));
+        }
+        other => panic!("expected StatusReply, got {other:?}"),
+    }
+}
+
+#[test]
 fn inputs_move_the_packet_in_snapshots() {
     let server = start_server();
     let mut a = Player::login(server, "mover");

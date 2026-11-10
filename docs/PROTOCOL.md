@@ -160,6 +160,9 @@ All UDP packets are **binary** (`postcard` serialization of a Rust enum), prefix
 | `Hello` | `token: u64` | every 200 ms until `HelloAck` |
 | `Input` | `token: u64`, `inputs: [InputFrame; up to 3]` (newest last), `last_snapshot_tick: u32`, `events_ack: u32` | **60 Hz** during a match |
 | `Ping` | `token`, `client_time_ms: u32` | 1 Hz (RTT display) |
+| `Status` | `nonce: u32`, `pad: [u8]` (whole datagram padded to **96 bytes**) | every 2 s while the login screen's CLOUD tab is open |
+
+**`Status` is the only packet answered without a token** (server browser: is it up, who's on, how far). Answering unauthenticated UDP is how game servers get abused for *reflection/amplification* DDoS: an attacker spoofs the victim's IP as the source, and the server sends its (bigger) reply to the victim. So the server only replies when its `StatusReply` is **no larger than the request datagram** (padding enforces it; an unpadded query gets silence). The attacker never gets more bytes out than they put in. Tests: `udp::tests::status_request_is_padded_and_outweighs_the_reply`, `status_query_answers_only_padded_requests`.
 
 ```rust
 struct InputFrame {
@@ -182,6 +185,7 @@ struct InputFrame {
 | `HelloAck` | — | reply to `Hello` |
 | `Snapshot` | see below | **30 Hz** |
 | `Pong` | `client_time_ms` | reply to `Ping` |
+| `StatusReply` | `nonce`, `name` (≤ 32 chars), `online: u16` (logged-in humans), `in_game: u16` | reply to a padded `Status` |
 
 ```rust
 struct Snapshot {
@@ -380,7 +384,15 @@ L  latency zone (stretch)   .  empty
 
 ## 11. Cross-network setup (bonus)
 
-- Server runs on a machine with a **public IP** (plan A: Azure for Students VM) with inbound **7777/tcp and 7777/udp** open in the cloud firewall (NSG) and OS firewall.
-- Clients connect with `gg-client --server <public-ip>:7777` from any network (home Wi-Fi, phone hotspot, campus).
+**As deployed:** a dedicated `gg-server` on a public Linux cloud VM (Ubuntu 24.04, x86_64), reachable as **`0xgg.duckdns.org`** (free dynamic-DNS name → the VM's public IP). Inbound **7777/tcp and 7777/udp** must be open.
+
+- **Build:** CI (`release.yml`, job `linux-server`) cross-compiles a static musl binary (~2.4 MB, no runtime dependencies), so nothing is installed or compiled on the VM.
+- **Run:** a sandboxed transient systemd unit, not as root:
+  `systemd-run --unit=0xgg -p DynamicUser=yes -p StateDirectory=0xgg -p MemoryMax=256M -p CPUQuota=50% -p ProtectSystem=strict -p ProtectHome=yes ... /opt/0xgg/gg-server --users /var/lib/0xgg/users.json`. Measured: ~2 MB RAM peak, a few % of one core during a match.
+- **Client:** the login screen's **CLOUD** tab connects to `0xgg.duckdns.org` and shows its live status (UDP `Status`: online/offline, RTT, players). **LAN** keeps the host's-IP box and HOST GAME. `GG_CLOUD_SERVER=host[:port]` points the CLOUD tab elsewhere without a rebuild.
+- **Why a name, not an IP:** the server can move to another machine by updating one DNS record; no client rebuild. The client resolves it with the OS resolver (`ToSocketAddrs`) for both TCP and the status probe; UDP game traffic then goes to the address the TCP connection actually used.
+- **NAT:** clients need no port forwarding (§5.5): they always send first.
+- Measured from a home connection: TCP RTT 54 ms, UDP RTT 64 ms, 0 % loss, 0 px prediction error.
+- Original plans (not needed): Azure for Students VM, or Tailscale overlay as a fallback.
 - Plan B: **Tailscale** on all 4 machines; clients use the server's `100.x.y.z` address. Honest framing for slides: an encrypted overlay (WireGuard) across different physical networks.
 - Demo proof: show each client's different public IP (`curl ifconfig.me`) and the server's connection log listing those source addresses.

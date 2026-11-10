@@ -15,6 +15,7 @@ use gg_shared::udp::{ClientPacket, ServerPacket};
 use crate::game_view::GameView;
 use crate::host::{self, HostedServer};
 use crate::net::{now_ms, Connection, NetEvent, UdpLink};
+use crate::probe::{self, cloud_server, Probe, CLOUD_LABEL};
 use crate::title::{Title, TitleAction};
 use crate::ui::{self, panel, text, text_centered, theme, Ui};
 
@@ -32,6 +33,13 @@ enum Screen {
     Room,
     Match,
     Results,
+}
+
+/// Login screen: play on the public cloud server, or on a LAN host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerMode {
+    Cloud,
+    Lan,
 }
 
 struct Me {
@@ -88,7 +96,11 @@ pub struct App {
     pub ui: Ui,
     screen: Screen,
     conn: Option<Connection>,
+    server_mode: ServerMode,
+    /// The LAN tab's "host's IP" field (the cloud address is fixed).
     server_addr: String,
+    /// Status/RTT of the cloud server (started when the login screen shows).
+    probe: Option<Probe>,
     username: String,
     password: String,
     status: Option<(String, Color)>,
@@ -141,11 +153,21 @@ impl App {
     pub fn new(server_addr: String, username: String, loss: f32) -> Self {
         let mut ui = Ui::default();
         ui.focus = Some(if username.is_empty() { F_USER } else { F_PASS });
+        // First launch, or last played on the cloud: CLOUD tab. A remembered
+        // LAN IP (or --server) opens the LAN tab with it filled in.
+        let cloud = server_addr.trim().is_empty()
+            || host::short_addr(&server_addr) == host::short_addr(cloud_server());
         App {
             ui,
             screen: Screen::Title,
             conn: None,
-            server_addr,
+            server_mode: if cloud {
+                ServerMode::Cloud
+            } else {
+                ServerMode::Lan
+            },
+            server_addr: if cloud { String::new() } else { server_addr },
+            probe: None,
             username,
             password: String::new(),
             status: None,
@@ -191,6 +213,7 @@ impl App {
                     (None, _) => "hosting, but no network found: join a Wi-Fi or hotspot so friends can connect".to_string(),
                 };
                 self.set_status(msg, theme::ACCENT);
+                self.server_mode = ServerMode::Lan;
                 self.server_addr = "127.0.0.1".into();
                 self.hosting = Some(h);
                 self.ui.focus = Some(F_USER);
@@ -199,12 +222,20 @@ impl App {
         }
     }
 
+    /// Where Login/Register connect to.
+    fn target_addr(&self) -> String {
+        match self.server_mode {
+            ServerMode::Cloud => cloud_server().to_string(),
+            ServerMode::Lan => self.server_addr.trim().to_string(),
+        }
+    }
+
     /// What other players type to reach the server we're on.
     fn invite_addr(&self) -> Option<String> {
         match &self.hosting {
             Some(h) => h.lan_ip.map(|ip| ip.to_string()),
             None => {
-                let a = host::short_addr(&self.server_addr);
+                let a = host::short_addr(&self.target_addr());
                 let local = a.is_empty() || a == "127.0.0.1" || a == "localhost";
                 (!local).then_some(a)
             }
@@ -255,7 +286,8 @@ impl App {
     /// Connect on demand (first Login/Register click), then send.
     fn connect_and_send(&mut self, msg: ClientMsg) {
         if self.conn.is_none() {
-            if self.server_addr.trim().is_empty() {
+            let target = self.target_addr();
+            if target.is_empty() {
                 self.set_status(
                     "type the host's IP, or press HOST GAME to host on this computer",
                     theme::WARN,
@@ -263,17 +295,11 @@ impl App {
                 self.ui.focus = Some(F_SERVER);
                 return;
             }
-            self.set_status(
-                format!("connecting to {} ...", self.server_addr),
-                theme::DIM,
-            );
-            match Connection::connect(&self.server_addr) {
+            self.set_status(format!("connecting to {target} ..."), theme::DIM);
+            match Connection::connect(&target) {
                 Ok(c) => self.conn = Some(c),
                 Err(e) => {
-                    self.set_status(
-                        format!("cannot reach {}: {e}", self.server_addr),
-                        theme::ERROR,
-                    );
+                    self.set_status(format!("cannot reach {target}: {e}"), theme::ERROR);
                     return;
                 }
             }
@@ -344,6 +370,7 @@ impl App {
                 ServerPacket::Pong { client_time_ms } => {
                     self.udp_rtt_ms = Some((arrived as u32).wrapping_sub(client_time_ms) as f64);
                 }
+                ServerPacket::StatusReply { .. } => {} // only the probe asks
                 ServerPacket::Snapshot(s) => {
                     // A snapshot also proves the UDP path works.
                     self.udp_state = UdpState::Ok;
@@ -413,7 +440,7 @@ impl App {
             } => {
                 self.token = token;
                 if self.hosting.is_none() {
-                    host::save_last_server(&self.server_addr);
+                    host::save_last_server(&self.target_addr());
                 }
                 let udp_addr = self
                     .conn
@@ -609,11 +636,13 @@ impl App {
             TitleAction::None => {}
             TitleAction::Play => {
                 self.screen = Screen::Login;
-                self.ui.focus = Some(if self.server_addr.is_empty() {
-                    F_SERVER
-                } else {
-                    F_USER
-                });
+                self.ui.focus = Some(
+                    if self.server_mode == ServerMode::Lan && self.server_addr.is_empty() {
+                        F_SERVER
+                    } else {
+                        F_USER
+                    },
+                );
             }
             TitleAction::Host => {
                 self.screen = Screen::Login;
@@ -624,6 +653,9 @@ impl App {
     }
 
     pub fn draw(&mut self) {
+        if let Some(p) = &self.probe {
+            p.set_active(self.screen == Screen::Login && self.conn.is_none());
+        }
         if self.screen == Screen::Title {
             // The title has its own footer (version + credits).
             self.draw_title();
@@ -694,14 +726,42 @@ impl App {
             self.status = None;
             return;
         }
-        text_centered("30 78 47 47", cx, 120.0, 22.0, theme::DIM);
-        text_centered("0xGG", cx, 210.0, 110.0, theme::ACCENT);
-        text_centered("Last packet standing.", cx, 250.0, 26.0, theme::TEXT);
+        text_centered("30 78 47 47", cx, 96.0, 22.0, theme::DIM);
+        text_centered("0xGG", cx, 186.0, 110.0, theme::ACCENT);
+        text_centered("Last packet standing.", cx, 226.0, 26.0, theme::TEXT);
 
         let w = 360.0;
         let x = cx - w / 2.0;
+        if self.hosting.is_none() {
+            // CLOUD | LAN switch.
+            for (i, (mode, label)) in [(ServerMode::Cloud, "CLOUD"), (ServerMode::Lan, "LAN")]
+                .into_iter()
+                .enumerate()
+            {
+                let r = Rect::new(x + i as f32 * (w / 2.0 + 3.0), 262.0, w / 2.0 - 3.0, 36.0);
+                if self.server_mode == mode {
+                    draw_rectangle(r.x, r.y, r.w, r.h, theme::PANEL_HI);
+                    draw_rectangle_lines(r.x, r.y, r.w, r.h, 2.0, theme::ACCENT);
+                    text_centered(
+                        label,
+                        r.x + r.w / 2.0,
+                        r.y + r.h / 2.0 + 7.0,
+                        20.0,
+                        theme::ACCENT,
+                    );
+                } else if self.ui.button(r, label) {
+                    self.server_mode = mode;
+                    self.ui.focus = Some(match mode {
+                        ServerMode::Lan if self.server_addr.is_empty() => F_SERVER,
+                        _ => F_USER,
+                    });
+                }
+            }
+        }
         let server_row = Rect::new(x, 320.0, w - 132.0, 42.0);
-        if let Some(h) = &self.hosting {
+        if self.hosting.is_none() && self.server_mode == ServerMode::Cloud {
+            self.draw_cloud_row(Rect::new(x, 320.0, w, 42.0));
+        } else if let Some(h) = &self.hosting {
             // Hosting: the address is fixed (us), show what friends need instead.
             panel(server_row);
             let ip = h.lan_ip.map_or("no LAN".to_string(), |ip| ip.to_string());
@@ -728,7 +788,9 @@ impl App {
             }
         }
         let host_btn = Rect::new(x + w - 120.0, 320.0, 120.0, 42.0);
-        if self.hosting.is_none() && self.ui.button(host_btn, "HOST GAME") {
+        if self.hosting.is_none() && self.server_mode == ServerMode::Cloud {
+            // No hosting on the cloud tab: the server is already out there.
+        } else if self.hosting.is_none() && self.ui.button(host_btn, "HOST GAME") {
             self.start_hosting();
         } else if self.hosting.is_some() {
             panel(host_btn);
@@ -750,7 +812,10 @@ impl App {
             &mut self.password,
             true,
             PASSWORD_MAX,
-            Some(F_SERVER),
+            Some(match self.server_mode {
+                ServerMode::Lan => F_SERVER,
+                ServerMode::Cloud => F_USER,
+            }),
         );
 
         let login = self
@@ -773,6 +838,39 @@ impl App {
                 password: creds.1,
             });
         }
+    }
+
+    /// CLOUD tab: the public server's live status, from the UDP probe.
+    fn draw_cloud_row(&mut self, r: Rect) {
+        let status = self
+            .probe
+            .get_or_insert_with(|| Probe::start(cloud_server()))
+            .status();
+        panel(r);
+        let (dot, info) = match &status {
+            probe::Status::Checking => (theme::DIM, "checking...".to_string()),
+            probe::Status::NoDns => (theme::ERROR, "no internet / DNS".to_string()),
+            probe::Status::Offline => (theme::ERROR, "offline".to_string()),
+            probe::Status::Online {
+                rtt_ms,
+                online,
+                in_game,
+                ..
+            } => (
+                theme::ACCENT,
+                if *in_game > 0 {
+                    format!("{rtt_ms:.0} ms  -  {online} on, {in_game} playing")
+                } else {
+                    format!("{rtt_ms:.0} ms  -  {online} online")
+                },
+            ),
+        };
+        let cy = r.y + r.h / 2.0;
+        draw_circle(r.x + 18.0, cy, 6.0, dot);
+        text(CLOUD_LABEL, r.x + 34.0, cy + 8.0, 22.0, theme::TEXT);
+        let iw = ui::text_width(&info, 18.0);
+        text(&info, r.x + r.w - iw - 12.0, cy + 7.0, 18.0, dot);
+        text(cloud_server(), r.x, r.y - 7.0, 18.0, theme::DIM);
     }
 
     /// Shared chat panel for lobby and room screens.

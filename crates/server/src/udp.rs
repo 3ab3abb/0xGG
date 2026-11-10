@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
-use gg_shared::udp::{self, ClientPacket, ServerPacket};
+use gg_shared::udp::{self, ClientPacket, ServerPacket, STATUS_NAME_MAX};
 use log::{debug, info, warn};
 
 use crate::game::RoomEvent;
@@ -24,6 +24,8 @@ pub enum UdpCtl {
     Register {
         token: u64,
         label: String,
+        /// Bots aren't counted as players online in `StatusReply`.
+        bot: bool,
     },
     Unregister {
         token: u64,
@@ -37,17 +39,18 @@ pub enum UdpCtl {
 
 struct Entry {
     label: String,
+    bot: bool,
     addr: Option<SocketAddr>,
     route: Option<(Sender<RoomEvent>, u8)>,
 }
 
-pub fn spawn(socket: UdpSocket, ctl: Receiver<UdpCtl>) -> io::Result<()> {
+pub fn spawn(socket: UdpSocket, ctl: Receiver<UdpCtl>, server_name: String) -> io::Result<()> {
     // Short timeout so control messages are applied within ~5 ms even when
     // no datagrams are arriving.
     socket.set_read_timeout(Some(Duration::from_millis(5)))?;
     thread::Builder::new()
         .name("udp".into())
-        .spawn(move || run(socket, ctl))?;
+        .spawn(move || run(socket, ctl, server_name))?;
     Ok(())
 }
 
@@ -62,7 +65,8 @@ fn reply(socket: &UdpSocket, addr: SocketAddr, packet: &ServerPacket) {
     }
 }
 
-fn run(socket: UdpSocket, ctl: Receiver<UdpCtl>) {
+fn run(socket: UdpSocket, ctl: Receiver<UdpCtl>, server_name: String) {
+    let name: String = server_name.chars().take(STATUS_NAME_MAX).collect();
     let mut entries: HashMap<u64, Entry> = HashMap::new();
     let mut buf = [0u8; 2048];
     let mut rejected: u64 = 0;
@@ -70,11 +74,12 @@ fn run(socket: UdpSocket, ctl: Receiver<UdpCtl>) {
     loop {
         loop {
             match ctl.try_recv() {
-                Ok(UdpCtl::Register { token, label }) => {
+                Ok(UdpCtl::Register { token, label, bot }) => {
                     entries.insert(
                         token,
                         Entry {
                             label,
+                            bot,
                             addr: None,
                             route: None,
                         },
@@ -123,6 +128,31 @@ fn run(socket: UdpSocket, ctl: Receiver<UdpCtl>) {
             ClientPacket::Hello { token }
             | ClientPacket::Input { token, .. }
             | ClientPacket::Ping { token, .. } => *token,
+            // Server browser: the one query answered without a login.
+            ClientPacket::Status { nonce, .. } => {
+                let humans = entries.values().filter(|e| !e.bot);
+                let status = ServerPacket::StatusReply {
+                    nonce: *nonce,
+                    name: name.clone(),
+                    online: humans.clone().count().min(u16::MAX as usize) as u16,
+                    in_game: humans
+                        .filter(|e| e.route.is_some())
+                        .count()
+                        .min(u16::MAX as usize) as u16,
+                };
+                // Anti-amplification: never answer with more bytes than the
+                // request carried (a spoofed source gets no bigger flood).
+                match udp::encode(&status) {
+                    Ok(bytes) if bytes.len() <= n => {
+                        if let Err(e) = socket.send_to(&bytes, addr) {
+                            debug!("udp status reply to {addr} failed: {e}");
+                        }
+                    }
+                    Ok(_) => rejected += 1, // unpadded request
+                    Err(e) => warn!("udp encode failed: {e}"),
+                }
+                continue;
+            }
         };
         let Some(entry) = entries.get_mut(&token) else {
             // Unknown token: ignore silently (never reply, so we can't be used
@@ -155,6 +185,7 @@ fn run(socket: UdpSocket, ctl: Receiver<UdpCtl>) {
                     });
                 }
             }
+            ClientPacket::Status { .. } => {} // answered above, before auth
         }
     }
 }
