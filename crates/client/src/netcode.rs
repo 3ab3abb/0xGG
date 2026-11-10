@@ -122,8 +122,7 @@ impl Predictor {
 
     /// Where to draw our packet (prediction + leftover correction).
     pub fn draw_pos(&self) -> Option<(f32, f32)> {
-        self.sim
-            .map(|s| (s.x + self.smooth.0, s.y + self.smooth.1))
+        self.sim.map(|s| (s.x + self.smooth.0, s.y + self.smooth.1))
     }
 
     #[cfg(test)]
@@ -225,7 +224,7 @@ impl Interpolator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gg_shared::game::{buttons, builtin_map};
+    use gg_shared::game::{builtin_map, buttons};
     use gg_shared::udp::{PlayerState, Snapshot};
 
     fn snap(tick: u32, ack: u32, you: PlayerSim, x: f32) -> Snapshot {

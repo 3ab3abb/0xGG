@@ -16,8 +16,8 @@ Built in Rust with raw `std::net` TCP + UDP sockets for the CS411 Computer Netwo
 | 2. UDP game loop: inputs, snapshots, physics, stomps/pits, rounds, reliable kill events | ✅ done |
 | 3. Weapons (Ping Pistol, Broadcast Shotgun, Fork Bomb, Firewall, Checksum Blade), pickup/throw/stun, spawners | ✅ done |
 | 4. Client-side prediction + reconciliation, entity interpolation | ✅ done |
-| 4b. Server lag compensation (rewind hitscan to `view_tick`) | ⏳ next |
-| 5. Cross-network deploy (bonus) | |
+| 4b. Server lag compensation (rewind hitscan/melee to `view_tick`), burst-tolerant input queue | ✅ done |
+| 5. Cross-network: dedicated server on a public Linux VM | ✅ done |
 
 ## Download (no Rust needed)
 

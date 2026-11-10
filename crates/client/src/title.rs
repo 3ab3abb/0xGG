@@ -27,7 +27,10 @@ const CREDITS: &[(&str, &str)] = &[
         "WEAPON & EFFECT SPRITES",
         "\"Free 2D Animated Vector Game Character Sprites\" by Raphael Goncalves (rgsdev), CC0",
     ),
-    ("BUILT WITH", "Rust, macroquad, raw std::net TCP + UDP sockets"),
+    (
+        "BUILT WITH",
+        "Rust, macroquad, raw std::net TCP + UDP sockets",
+    ),
 ];
 
 pub struct Title {
@@ -82,7 +85,11 @@ impl Title {
     fn draw_seeker(&self, slot: u8, feet: Vec2, scale: f32, t: f64, running: bool, right: bool) {
         match self.seeker(slot) {
             Some(s) => {
-                let (sheet, fps) = if running { (&s.run, 14.0) } else { (&s.idle, 10.0) };
+                let (sheet, fps) = if running {
+                    (&s.run, 14.0)
+                } else {
+                    (&s.idle, 10.0)
+                };
                 let frame = ((t + slot as f64 * 0.37) * fps) as usize % sheet.n;
                 sheet.draw(frame, feet, right, scale, WHITE);
             }
@@ -90,7 +97,13 @@ impl Title {
                 let (w, hh) = (12.0 * scale, 14.0 * scale);
                 let c = theme::slot_color(slot);
                 draw_rectangle(feet.x - w / 2.0, feet.y - hh, w, hh, c);
-                draw_rectangle(feet.x - w / 2.0, feet.y - hh, w, 4.0 * scale, with_alpha(BLACK, 0.4));
+                draw_rectangle(
+                    feet.x - w / 2.0,
+                    feet.y - hh,
+                    w,
+                    4.0 * scale,
+                    with_alpha(BLACK, 0.4),
+                );
             }
         }
     }
@@ -101,7 +114,13 @@ impl Title {
         if phase < 0.12 {
             let d = size * 0.025;
             text_centered("0xGG", cx - d, y, size, with_alpha(theme::ERROR, 0.7));
-            text_centered("0xGG", cx + d, y, size, with_alpha(theme::slot_color(2), 0.7));
+            text_centered(
+                "0xGG",
+                cx + d,
+                y,
+                size,
+                with_alpha(theme::slot_color(2), 0.7),
+            );
         }
         text_centered("0xGG", cx, y, size, theme::ACCENT);
     }
@@ -158,7 +177,11 @@ impl Title {
         let mut out = TitleAction::None;
         for (i, (label, action)) in items.into_iter().enumerate() {
             let r = Rect::new(x, y + i as f32 * 58.0, w, 46.0);
-            let color = if label == "QUIT" { theme::ERROR } else { theme::ACCENT };
+            let color = if label == "QUIT" {
+                theme::ERROR
+            } else {
+                theme::ACCENT
+            };
             if ui.button_colored(r, label, color) {
                 if label == "CREDITS" {
                     self.show_credits = true;
@@ -189,8 +212,10 @@ impl Title {
             text(body, r.x + 28.0, y + 26.0, 20.0, theme::TEXT);
             y += 72.0;
         }
-        if ui.button(Rect::new(r.x + r.w - 168.0, r.y + r.h - 64.0, 140.0, 44.0), "BACK")
-            || is_key_pressed(KeyCode::Escape)
+        if ui.button(
+            Rect::new(r.x + r.w - 168.0, r.y + r.h - 64.0, 140.0, 44.0),
+            "BACK",
+        ) || is_key_pressed(KeyCode::Escape)
         {
             self.show_credits = false;
         }
@@ -213,9 +238,14 @@ impl Title {
         for (i, slot) in [1u8, 2, 3].into_iter().enumerate() {
             let x = 180.0 + i as f32 * 120.0;
             self.draw_seeker(slot, vec2(x, base), 4.0, t, false, i < 2);
-            text_centered(&format!("0x{slot:02X}"), x, base - 120.0, 18.0, theme::slot_color(slot));
+            text_centered(
+                &format!("0x{slot:02X}"),
+                x,
+                base - 120.0,
+                18.0,
+                theme::slot_color(slot),
+            );
         }
         self.menu_vertical(ui, cx - 140.0, 300.0, 280.0)
     }
-
 }

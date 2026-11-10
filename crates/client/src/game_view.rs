@@ -516,8 +516,20 @@ impl GameView {
                     } * SCALE;
                     let blink = (now * 12.0) as i64 % 2 == 0;
                     if pr.kind == ProjectileKind::Bomb {
-                        let c = if blink { WHITE } else { Color::new(0.75, 0.6, 0.6, 1.0) };
-                        sprites::draw_vector(&self.art.fork_bomb, p, vec2(0.5, 0.5), SCALE, 0.0, false, c);
+                        let c = if blink {
+                            WHITE
+                        } else {
+                            Color::new(0.75, 0.6, 0.6, 1.0)
+                        };
+                        sprites::draw_vector(
+                            &self.art.fork_bomb,
+                            p,
+                            vec2(0.5, 0.5),
+                            SCALE,
+                            0.0,
+                            false,
+                            c,
+                        );
                         continue;
                     }
                     let c = if blink {
@@ -546,7 +558,15 @@ impl GameView {
                     );
                     if age < 0.07 {
                         let angle = (p1.y - p0.y).atan2(p1.x - p0.x);
-                        sprites::draw_vector(&self.art.muzzle, p0, vec2(0.05, 0.5), SCALE * 0.8, angle, false, WHITE);
+                        sprites::draw_vector(
+                            &self.art.muzzle,
+                            p0,
+                            vec2(0.05, 0.5),
+                            SCALE * 0.8,
+                            angle,
+                            false,
+                            WHITE,
+                        );
                     }
                 }
                 Effect::Blast { x, y, radius } => {
@@ -578,8 +598,22 @@ impl GameView {
             let c = theme::slot_color(slot);
             let a = if k < 0.6 { 1.0 } else { (1.0 - k) / 0.4 };
             let p = w2s(x, y);
-            sprites::draw_vector(&self.art.drops[frame], p, vec2(0.5, 0.6), SCALE, 0.0, false, with_alpha(c, a));
-            text_centered("PACKET DROPPED", p.x, p.y - 34.0 - age * 20.0, 18.0, with_alpha(theme::ERROR, a));
+            sprites::draw_vector(
+                &self.art.drops[frame],
+                p,
+                vec2(0.5, 0.6),
+                SCALE,
+                0.0,
+                false,
+                with_alpha(c, a),
+            );
+            text_centered(
+                "PACKET DROPPED",
+                p.x,
+                p.y - 34.0 - age * 20.0,
+                18.0,
+                with_alpha(theme::ERROR, a),
+            );
         }
 
         self.draw_hud(hud, s);
@@ -596,7 +630,15 @@ impl GameView {
         };
         let c = with_alpha(WHITE, alpha);
         if up && w != Weapon::ForkBomb {
-            sprites::draw_vector(tex, grip, anchor, SCALE, -std::f32::consts::FRAC_PI_2, false, c);
+            sprites::draw_vector(
+                tex,
+                grip,
+                anchor,
+                SCALE,
+                -std::f32::consts::FRAC_PI_2,
+                false,
+                c,
+            );
         } else {
             sprites::draw_vector(tex, grip, anchor, SCALE, 0.0, !right, c);
         }
@@ -648,7 +690,8 @@ impl GameView {
             return true;
         }
         if p.flags & flags::STUNNED != 0 {
-            sk.hurt.draw(((t / 0.06) as usize) % sk.hurt.n, feet, right, SCALE, WHITE);
+            sk.hurt
+                .draw(((t / 0.06) as usize) % sk.hurt.n, feet, right, SCALE, WHITE);
         } else if p.flags & flags::GROUNDED == 0 {
             let f = if p.vy < -40.0 {
                 1 + (((p.vy + 340.0) / 300.0).clamp(0.0, 1.0) * 11.0) as usize
@@ -659,9 +702,11 @@ impl GameView {
             };
             sk.jump.draw(f, feet, right, SCALE, WHITE);
         } else if p.vx.abs() > 20.0 {
-            sk.run.draw(((t / 0.07) as usize) % sk.run.n, feet, right, SCALE, WHITE);
+            sk.run
+                .draw(((t / 0.07) as usize) % sk.run.n, feet, right, SCALE, WHITE);
         } else {
-            sk.idle.draw(((t / 0.1) as usize) % sk.idle.n, feet, right, SCALE, WHITE);
+            sk.idle
+                .draw(((t / 0.1) as usize) % sk.idle.n, feet, right, SCALE, WHITE);
         }
         true
     }
@@ -902,13 +947,7 @@ impl GameView {
                 }
             };
             let w = text_width(&line, 22.0);
-            text(
-                &line,
-                VW - w - 40.0,
-                VH - 38.0,
-                22.0,
-                theme::TEXT,
-            );
+            text(&line, VW - w - 40.0, VH - 38.0, 22.0, theme::TEXT);
         }
 
         // Kill feed, top right.
@@ -923,13 +962,7 @@ impl GameView {
             y += 24.0;
         }
 
-        text(
-            &self.net_stats(),
-            40.0,
-            VH - 34.0,
-            16.0,
-            theme::DIM,
-        );
+        text(&self.net_stats(), 40.0, VH - 34.0, 16.0, theme::DIM);
         text(CONTROLS, 40.0, VH - 50.0, 16.0, theme::DIM);
     }
 }

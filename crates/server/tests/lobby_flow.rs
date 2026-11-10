@@ -43,7 +43,9 @@ impl TestClient {
             .unwrap();
         let reader = BufReader::new(stream.try_clone().unwrap());
         let mut c = TestClient { stream, reader };
-        assert!(matches!(c.recv(), ServerMsg::Welcome { protocol, .. } if protocol == gg_shared::constants::PROTOCOL_VERSION));
+        assert!(
+            matches!(c.recv(), ServerMsg::Welcome { protocol, .. } if protocol == gg_shared::constants::PROTOCOL_VERSION)
+        );
         c
     }
 

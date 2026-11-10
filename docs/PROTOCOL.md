@@ -253,7 +253,8 @@ Since snapshots go out every 33 ms, an event is effectively retransmitted every 
 | Snapshot send rate | **30 Hz** | Halves bandwidth; interpolation hides the gap. |
 | Client input send rate | **60 Hz** | One per simulation tick. |
 | Interpolation delay (remote players) | **100 ms** | ≈ 3 snapshots buffered → tolerates 2 lost in a row. |
-| Lag-compensation max rewind | **200 ms** | Beyond this, shooter's view is too stale; prevents abuse. |
+| Lag-compensation max rewind | **300 ms** | A screen is ≈ 100 ms interpolation + 1 RTT behind the server (measured 266 ms at 120 ms RTT), so this covers RTTs up to ~150 ms. Beyond it the view is too stale and victims would die behind cover. |
+| Input catch-up | > **2** queued inputs → apply 2 per tick; > 30 → skip ahead | Wi-Fi delivers inputs in bursts. Catching up instead of dropping keeps every predicted input (no lost jumps/shots, no corrections). |
 | TCP app heartbeat | `Ping` every **2 s** | |
 | TCP heartbeat timeout | **6 s** of silence | |
 | UDP silence timeout (in match) | **3 s** without `Input` | |
@@ -337,7 +338,7 @@ Whichever layer fires first, the server runs the **same cleanup path** once (ide
 | **Client-side prediction** | Your own packet | Apply your input locally immediately → 0 ms perceived input lag. |
 | **Server reconciliation** | Your own packet | On snapshot: reset to server state, re-apply inputs with `seq > ack_input_seq`. Smooth small corrections over a few frames. |
 | **Entity interpolation** | Other players, projectiles | Render at `now − 100 ms`, lerping between the two surrounding snapshots. |
-| **Lag compensation** | Ping Pistol (hitscan), Checksum Blade | Server keeps 1 s of hitbox history; on SHOOT it rewinds targets to the shooter's `view_tick` (clamped to 200 ms) and tests the hit there. |
+| **Lag compensation** | Ping Pistol (hitscan), Checksum Blade | Server keeps 1 s of hitbox history; on SHOOT it rewinds targets to the shooter's `view_tick` (clamped to 300 ms) and tests the hit there. |
 
 Build order: plain snapshots first (works, a bit laggy) → prediction/reconciliation → interpolation → lag compensation. Each layer is independently demoable.
 
@@ -346,7 +347,9 @@ Build order: plain snapshots first (works, a bit laggy) → prediction/reconcili
 - *Prediction.* Each 60 Hz input is pushed to a pending list and immediately stepped through the shared `PlayerSim::step`. Prediction runs only while the server moves players (not during the countdown) and you are alive.
 - *Reconciliation.* `PlayerState` only carries position/velocity, but `step` also depends on hidden timers (coyote time, jump buffer, drop-through, stun, previous buttons). So each snapshot carries `you`: the receiver's **full** `PlayerSim` right after `ack_input_seq`. The client drops pending inputs `≤ ack`, restarts from `you`, and replays the rest. Because the simulation is deterministic, a server that saw the same inputs gives **zero** error (measured: 449 of 450 reconciliations exact at 150 ms RTT). Real disagreements (a stomp bounce, shotgun recoil, a stun) are corrected; errors up to 48 px are blended away over ~100 ms, bigger ones (respawn) snap.
 - *Interpolation.* Snapshots are buffered (~1 s). The client estimates the server clock (`server_tick − local_time·60`, following fresher samples quickly and late ones slowly) and draws others at `estimated_tick − 6` (100 ms), blending positions of players, projectiles and items between the two surrounding snapshots. Moves > 48 px between snapshots are teleports and are not blended. If the buffer runs dry, the newest snapshot is held (no extrapolation).
-- *`view_tick`.* Inputs now report the interpolated tick actually on screen, which is what server-side lag compensation needs.
+- *`view_tick`.* Inputs report the interpolated tick actually on screen, which is what server-side lag compensation needs.
+- *Lag compensation* (`crates/server/src/game/combat.rs`). After every tick the server records each player's hitbox (`Game::history`, 1 s, cleared on round start). Each applied input updates that player's `view_tick`. When a Ping Pistol ray is marched or a Checksum Blade swing is checked, the *other* players are tested at their positions from the shooter's `view_tick` (clamped to 300 ms back); walls and firewalls use the present. A target must be alive both now and then. A reflected shot is tested from the reflector's view. Projectiles (shotgun pellets, fork bombs) and stomps are server-simulated objects and are not rewound. `gg-server --no-lag-comp` disables it for a side-by-side demo; with `RUST_LOG=gg_server::game=debug` the server logs every player's view delay every 5 s.
+- *Input catch-up* (`crates/server/src/game.rs`). The server normally applies one input per player per tick. Wi-Fi tends to deliver packets in bursts, and the server used to drop inputs when more than 4 were queued, losing a tapped jump or shot and forcing a visible correction. Now, while more than 2 are queued, it applies two per tick (stepping the older one first, exactly as the client predicted it), so every input is simulated exactly once. Only after a ~0.5 s freeze does it skip ahead.
 - *Demo.* `--lag 75` delays every UDP packet 75 ms each way (150 ms RTT) on a LAN; `--loss N` drops packets. In a match, **F1** toggles prediction and **F2** interpolation; the HUD shows inputs in flight and the size of the last correction.
 
 ---

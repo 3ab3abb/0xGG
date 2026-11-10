@@ -42,7 +42,11 @@ impl Sheet {
     /// px per frame px, mirrored when facing left.
     pub fn draw(&self, i: usize, feet: Vec2, right: bool, scale: f32, color: Color) {
         let i = i.min(self.n - 1);
-        let px = if right { self.pivot.x } else { self.fw - self.pivot.x };
+        let px = if right {
+            self.pivot.x
+        } else {
+            self.fw - self.pivot.x
+        };
         let pos = snap(feet - vec2(px, self.pivot.y) * scale);
         draw_texture_ex(
             &self.tex,
@@ -135,7 +139,9 @@ impl Art {
         });
         Art {
             pistol: png(include_bytes!("../../../assets/sprites/ping_pistol.png")),
-            shotgun: png(include_bytes!("../../../assets/sprites/broadcast_shotgun.png")),
+            shotgun: png(include_bytes!(
+                "../../../assets/sprites/broadcast_shotgun.png"
+            )),
             fork_bomb: png(include_bytes!("../../../assets/sprites/fork_bomb.png")),
             muzzle: png(include_bytes!("../../../assets/sprites/muzzle.png")),
             drops: [
@@ -189,11 +195,17 @@ fn find_seeker_dir() -> Option<PathBuf> {
         candidates.push(PathBuf::from(dir).join("seeker"));
     }
     candidates.push(PathBuf::from("assets/seeker"));
-    if let Some(exe_dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    {
         candidates.push(exe_dir.join("assets/seeker"));
         candidates.push(exe_dir.join("../../assets/seeker"));
     }
-    candidates.push(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/seeker")));
+    candidates.push(PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/seeker"
+    )));
     candidates
         .into_iter()
         .find(|d| d.join("Seeker_Void_Idle_30x30_24f.png").is_file())
@@ -256,7 +268,11 @@ fn recolor(img: &mut Image, target: Color, white: bool) {
         if px[3] == 0 {
             continue;
         }
-        let (h, s, v) = rgb_to_hsv(px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0);
+        let (h, s, v) = rgb_to_hsv(
+            px[0] as f32 / 255.0,
+            px[1] as f32 / 255.0,
+            px[2] as f32 / 255.0,
+        );
         if !(0.65..0.95).contains(&h) || s <= 0.15 {
             continue;
         }
@@ -281,7 +297,11 @@ fn split_slash(img: &Image, fw: u16) -> (Image, Image) {
     let (b, s) = (body.get_image_data_mut(), slash.get_image_data_mut());
     for (i, px) in img.get_image_data().iter().enumerate() {
         let fx = (i % w) % fw as usize;
-        let (h, sat, v) = rgb_to_hsv(px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0);
+        let (h, sat, v) = rgb_to_hsv(
+            px[0] as f32 / 255.0,
+            px[1] as f32 / 255.0,
+            px[2] as f32 / 255.0,
+        );
         let is_slash = px[3] > 0 && fx >= 22 && (0.25..0.55).contains(&h) && sat > 0.3 && v > 0.45;
         if is_slash {
             b[i] = [0, 0, 0, 0];

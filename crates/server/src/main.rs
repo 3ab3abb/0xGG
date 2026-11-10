@@ -5,10 +5,13 @@ use std::process::ExitCode;
 use gg_server::Config;
 use gg_shared::constants::DEFAULT_PORT;
 
-const USAGE: &str = "usage: gg-server [--bind ADDR:PORT] [--users FILE] [--name NAME]
+const USAGE: &str =
+    "usage: gg-server [--bind ADDR:PORT] [--users FILE] [--name NAME] [--no-lag-comp]
   --bind   address to listen on (default 0.0.0.0:7777, TCP and UDP)
   --users  account database file (default users.json)
-  --name   server name shown to clients (default 0xGG)";
+  --name   server name shown to clients (default 0xGG)
+  --no-lag-comp  test hits against current positions instead of what the
+                 shooter saw (to demo the difference lag compensation makes)";
 
 fn main() -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -27,6 +30,10 @@ fn main() -> ExitCode {
             "--bind" => value().map(|v| bind = v),
             "--users" => value().map(|v| users_path = v.into()),
             "--name" => value().map(|v| server_name = v),
+            "--no-lag-comp" => {
+                gg_server::game::LAG_COMP.store(false, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;

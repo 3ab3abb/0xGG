@@ -12,6 +12,7 @@
 use std::collections::VecDeque;
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -40,9 +41,26 @@ const FIRST_COUNTDOWN_TICKS: u32 = MATCH_COUNTDOWN_MS * TICK_RATE / 1000;
 const ROUND_COUNTDOWN_TICKS: u32 = secs(1.5);
 const ROUND_OVER_TICKS: u32 = secs(2.5);
 const ROUND_TIME_TICKS: u32 = secs(90.0);
-/// If a client's input queue grows past this (burst after a lag spike),
-/// skip ahead instead of playing stale inputs late.
-const MAX_INPUT_BACKLOG: usize = 4;
+/// Wi-Fi often delivers input packets in bursts. While more than this many
+/// inputs are queued, apply two per tick (catch up) instead of dropping any:
+/// every input the client predicted is then simulated exactly once, so a
+/// burst never costs a jump or a shot, nor a visible correction.
+const CATCH_UP_BACKLOG: usize = 2;
+/// After a real freeze (half a second of queued input), skip ahead instead
+/// of replaying stale inputs in slow motion.
+const MAX_INPUT_BACKLOG: usize = 30;
+/// Server-side lag compensation for hitscan (Ping Pistol) and melee
+/// (Checksum Blade): hits are tested against where the targets were on the
+/// shooter's screen (`InputFrame::view_tick`), not where they are now.
+/// `gg-server --no-lag-comp` turns it off for a side-by-side demo.
+pub static LAG_COMP: AtomicBool = AtomicBool::new(true);
+/// Never rewind further than this (docs/PROTOCOL.md §8). A screen is about
+/// 100 ms interpolation + the round trip behind the server, so 300 ms covers
+/// round trips up to ~150 ms (measured: 266 ms behind at 120 ms RTT). Beyond
+/// it the view is too stale and victims would die "behind cover".
+pub const MAX_REWIND_TICKS: u32 = 300 * TICK_RATE / 1000;
+/// Ticks of hitbox history kept (1 s).
+const HISTORY_TICKS: usize = TICK_RATE as usize;
 /// A falling packet whose feet were at most this far below the victim's top
 /// last tick counts as landing on its header.
 const STOMP_TOLERANCE: f32 = 4.0;
@@ -95,6 +113,16 @@ struct Player {
     cooldown: u8,
     /// Checksum Blade swing ticks left.
     swing: u8,
+    /// Server tick this client was displaying when it sent the input we
+    /// last applied (what lag compensation rewinds to).
+    view_tick: u32,
+}
+
+/// Where every player's hitbox was at the end of one tick.
+struct Frame {
+    tick: u32,
+    /// Indexed like `Game::players`: `(x, y, alive)`.
+    bodies: Vec<(f32, f32, bool)>,
 }
 
 struct Game {
@@ -111,6 +139,9 @@ struct Game {
     spawners: Vec<Spawner>,
     next_entity_id: u16,
     rng: u64,
+    lag_comp: bool,
+    /// Last `HISTORY_TICKS` frames, oldest first (lag compensation).
+    history: VecDeque<Frame>,
 }
 
 pub fn spawn(
@@ -152,6 +183,7 @@ impl Game {
                 aim_up: false,
                 cooldown: 0,
                 swing: 0,
+                view_tick: 0,
                 outbox: VecDeque::new(),
                 next_event_id: 1,
                 stats: SlotStats {
@@ -189,6 +221,8 @@ impl Game {
             spawners,
             next_entity_id: 0,
             rng: seed | 1,
+            lag_comp: LAG_COMP.load(Ordering::Relaxed),
+            history: VecDeque::with_capacity(HISTORY_TICKS + 1),
         };
         game.start_round(FIRST_COUNTDOWN_TICKS);
         game
@@ -196,8 +230,10 @@ impl Game {
 
     fn run(mut self, rx: Receiver<RoomEvent>, lobby: Sender<LobbyEvent>) {
         info!(
-            "room {}: game loop started on map '{}'",
-            self.room_id, self.map.name
+            "room {}: game loop started on map '{}' (lag compensation {})",
+            self.room_id,
+            self.map.name,
+            if self.lag_comp { "on" } else { "off" }
         );
         let tick_len = Duration::from_secs_f64(1.0 / TICK_RATE as f64);
         let mut next = Instant::now();
@@ -307,31 +343,79 @@ impl Game {
             p.swing = 0;
         }
         self.reset_arena();
+        // Everyone teleported to a spawn: never rewind into the last round.
+        self.history.clear();
         self.phase = Phase::Countdown(countdown);
     }
 
     /// Advance one tick. Returns true when the match is won.
     fn step(&mut self) -> bool {
+        let won = self.step_inner();
+        self.record_history();
+        if self.tick.is_multiple_of(TICK_RATE * 5) {
+            // How far in the past each player's screen is: what a shot from
+            // them would be rewound by (interpolation delay + one-way lag).
+            let views: Vec<String> = self
+                .players
+                .iter()
+                .filter(|p| p.connected && p.view_tick != 0)
+                .map(|p| {
+                    let behind = self.tick.saturating_sub(p.view_tick);
+                    format!("0x{:02X}:{}ms", p.slot, ticks_to_ms(behind))
+                })
+                .collect();
+            debug!("room {}: view delay {}", self.room_id, views.join(" "));
+        }
+        won
+    }
+
+    /// Remember this tick's hitboxes, as the snapshot for it shows them.
+    fn record_history(&mut self) {
+        if self.history.len() >= HISTORY_TICKS {
+            self.history.pop_front();
+        }
+        self.history.push_back(Frame {
+            tick: self.tick,
+            bodies: self
+                .players
+                .iter()
+                .map(|p| (p.sim.x, p.sim.y, p.alive))
+                .collect(),
+        });
+    }
+
+    fn step_inner(&mut self) -> bool {
         self.tick += 1;
-        for p in &mut self.players {
+        // Buttons of an extra input applied this tick to catch up.
+        let mut extra: Vec<Option<u16>> = vec![None; self.players.len()];
+        for (p, extra) in self.players.iter_mut().zip(&mut extra) {
             if p.inputs.len() > MAX_INPUT_BACKLOG {
-                let skip = p.inputs.len() - 2;
+                let skip = p.inputs.len() - CATCH_UP_BACKLOG;
                 p.inputs.drain(..skip);
+            }
+            if p.inputs.len() > CATCH_UP_BACKLOG {
+                if let Some(f) = p.inputs.pop_front() {
+                    *extra = Some(f.buttons);
+                }
             }
             // No new input this tick (late or lost packet): repeat the last
             // known buttons, the best guess for a held key.
             if let Some(f) = p.inputs.pop_front() {
                 p.buttons = f.buttons;
                 p.last_applied_seq = f.seq;
+                p.view_tick = f.view_tick;
             }
         }
         // Edge detection happens here, on the server's own tick, so a press
-        // is never lost even if the packet carrying it arrived late.
+        // is never lost even if the packet carrying it arrived late (or in
+        // the extra input of a catch-up tick).
         let pressed: Vec<u16> = self
             .players
             .iter_mut()
-            .map(|p| {
-                let pressed = p.buttons & !p.prev_buttons;
+            .zip(&extra)
+            .map(|(p, extra)| {
+                let before = extra.unwrap_or(p.prev_buttons);
+                let pressed = (before & !p.prev_buttons) | (p.buttons & !before);
                 p.prev_buttons = p.buttons;
                 pressed
             })
@@ -349,7 +433,7 @@ impl Game {
                 };
             }
             Phase::Playing(left) => {
-                self.simulate(true, &pressed);
+                self.simulate(true, &pressed, &extra);
                 let alive: Vec<u8> = self
                     .players
                     .iter()
@@ -385,7 +469,7 @@ impl Game {
                 }
             }
             Phase::RoundOver { winner, left } => {
-                self.simulate(false, &pressed); // victory lap: movement only, no kills
+                self.simulate(false, &pressed, &extra); // victory lap: movement only, no kills
                 if left <= 1 {
                     let won = self
                         .players
@@ -406,11 +490,16 @@ impl Game {
         false
     }
 
-    fn simulate(&mut self, combat: bool, pressed: &[u16]) {
+    fn simulate(&mut self, combat: bool, pressed: &[u16], extra: &[Option<u16>]) {
         let prev: Vec<(f32, f32)> = self.players.iter().map(|p| (p.sim.x, p.sim.y)).collect();
-        for p in self.players.iter_mut() {
+        for (p, extra) in self.players.iter_mut().zip(extra) {
             p.aim_up = p.alive && p.buttons & buttons::AIM_UP != 0;
             if p.alive {
+                // Catching up: step the older input first, exactly like the
+                // client's prediction did.
+                if let Some(b) = *extra {
+                    p.sim.step(&self.map, b);
+                }
                 p.sim.step(&self.map, p.buttons);
             }
         }
@@ -712,6 +801,73 @@ mod tests {
         assert_eq!(seqs, vec![1, 2, 3, 4]);
     }
 
+    /// Feed `buttons` to player 0 as one burst (as Wi-Fi delivers them).
+    fn burst(g: &mut Game, first_seq: u32, buttons: &[u16]) {
+        let frames = buttons
+            .iter()
+            .enumerate()
+            .map(|(k, &b)| InputFrame {
+                seq: first_seq + k as u32,
+                buttons: b,
+                view_tick: u32::MAX,
+            })
+            .collect();
+        g.on_event(RoomEvent::Input {
+            slot: 1,
+            addr: "127.0.0.1:9".parse().unwrap(),
+            frames,
+            events_ack: 0,
+        });
+    }
+
+    #[test]
+    fn input_burst_is_caught_up_without_dropping_presses() {
+        use gg_shared::game::buttons::SHOOT;
+        let mut g = arena();
+        give(&mut g, 0, Weapon::PingPistol);
+        g.players[1].sim.x = 500.0; // out of the way
+                                    // 8 inputs at once; the only shot is a one-frame tap in the middle.
+        burst(&mut g, 1, &[0, 0, 0, SHOOT, 0, 0, 0, 0]);
+        let mut ticks = 0;
+        while g.players[0].last_applied_seq < 8 {
+            g.step();
+            ticks += 1;
+        }
+        assert_eq!(g.players[0].held.unwrap().ammo, 5, "the tap was lost");
+        assert!(ticks < 8, "should catch up, took {ticks} ticks");
+        assert!(g.players[0].inputs.len() <= CATCH_UP_BACKLOG);
+    }
+
+    #[test]
+    fn catch_up_simulates_every_input_once() {
+        use gg_shared::game::buttons::RIGHT;
+        // Same inputs, one per tick vs. all in one burst: same end position.
+        let run = |bursty: bool| {
+            let mut g = arena();
+            let inputs = [RIGHT; 12];
+            if bursty {
+                burst(&mut g, 1, &inputs);
+            } else {
+                for (k, b) in inputs.iter().enumerate() {
+                    burst(&mut g, 1 + k as u32, &[*b]);
+                    g.step();
+                }
+            }
+            while g.players[0].last_applied_seq < 12 {
+                g.step();
+            }
+            // Stop and let both settle identically.
+            g.players[0].buttons = 0;
+            g.players[0].sim.x
+        };
+        let (steady, bursty) = (run(false), run(true));
+        assert!(steady > 260.0, "player should have moved right");
+        assert!(
+            (steady - bursty).abs() < 0.01,
+            "steady {steady} vs bursty {bursty}"
+        );
+    }
+
     #[test]
     fn events_are_resent_until_acked() {
         let mut g = game();
@@ -772,6 +928,9 @@ mod tests {
             g.players[i].sim = PlayerSim::spawn_at(x, y, right);
             g.players[i].sim.grounded = true;
             g.players[i].held = None;
+            // A zero-latency client: it sees the present, so these weapon
+            // tests (which teleport players) never rewind into the past.
+            g.players[i].view_tick = u32::MAX;
         }
         g
     }

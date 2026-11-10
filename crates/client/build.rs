@@ -44,7 +44,12 @@ fn main() {
             code.push_str("pub static SEEKER: Option<&[(&str, &[u8])]> = Some(&[\n");
             for s in SHEETS {
                 let path = dir.join(s);
-                writeln!(code, "    ({s:?}, include_bytes!({:?})),", path.display().to_string()).unwrap();
+                writeln!(
+                    code,
+                    "    ({s:?}, include_bytes!({:?})),",
+                    path.display().to_string()
+                )
+                .unwrap();
             }
             code.push_str("]);\n");
         }

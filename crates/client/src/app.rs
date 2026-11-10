@@ -14,8 +14,8 @@ use gg_shared::udp::{ClientPacket, ServerPacket};
 
 use crate::game_view::GameView;
 use crate::host::{self, HostedServer};
-use crate::title::{Title, TitleAction};
 use crate::net::{now_ms, Connection, NetEvent, UdpLink};
+use crate::title::{Title, TitleAction};
 use crate::ui::{self, panel, text, text_centered, theme, Ui};
 
 const F_SERVER: u32 = 1;
@@ -217,17 +217,25 @@ impl App {
         let (label, value, color) = match (self.invite_addr(), self.hosting.is_some()) {
             (Some(ip), true) => ("YOU ARE HOSTING  -  FRIENDS TYPE", ip, theme::ACCENT),
             (Some(ip), false) => ("SERVER  -  FRIENDS TYPE", ip, theme::ACCENT),
-            (None, _) => ("NO LAN IP", "join a Wi-Fi / hotspot".to_string(), theme::WARN),
+            (None, _) => (
+                "NO LAN IP",
+                "join a Wi-Fi / hotspot".to_string(),
+                theme::WARN,
+            ),
         };
         text(label, r.x + 12.0, r.y + 16.0, 15.0, theme::DIM);
         text(&value, r.x + 12.0, r.y + r.h - 9.0, 24.0, color);
         if self.invite_addr().is_some()
-            && self
-                .ui
-                .button(Rect::new(r.x + r.w - 86.0, r.y + 7.0, 76.0, r.h - 14.0), "COPY")
+            && self.ui.button(
+                Rect::new(r.x + r.w - 86.0, r.y + 7.0, 76.0, r.h - 14.0),
+                "COPY",
+            )
         {
             macroquad::miniquad::window::clipboard_set(&value);
-            self.set_status(format!("copied {value} - send it to your friends"), theme::DIM);
+            self.set_status(
+                format!("copied {value} - send it to your friends"),
+                theme::DIM,
+            );
         }
     }
 
@@ -601,7 +609,11 @@ impl App {
             TitleAction::None => {}
             TitleAction::Play => {
                 self.screen = Screen::Login;
-                self.ui.focus = Some(if self.server_addr.is_empty() { F_SERVER } else { F_USER });
+                self.ui.focus = Some(if self.server_addr.is_empty() {
+                    F_SERVER
+                } else {
+                    F_USER
+                });
             }
             TitleAction::Host => {
                 self.screen = Screen::Login;
@@ -651,7 +663,10 @@ impl App {
             String::new()
         };
         if self.lag_ms > 0.0 {
-            loss.push_str(&format!("  |  SIMULATED LAG +{:.0} ms each way", self.lag_ms));
+            loss.push_str(&format!(
+                "  |  SIMULATED LAG +{:.0} ms each way",
+                self.lag_ms
+            ));
         }
         let net = format!("{tcp}{udp}{loss}");
         let w = ui::text_width(&net, 18.0);
@@ -690,7 +705,13 @@ impl App {
             // Hosting: the address is fixed (us), show what friends need instead.
             panel(server_row);
             let ip = h.lan_ip.map_or("no LAN".to_string(), |ip| ip.to_string());
-            text("hosting  -  friends type this IP", x, 313.0, 18.0, theme::DIM);
+            text(
+                "hosting  -  friends type this IP",
+                x,
+                313.0,
+                18.0,
+                theme::DIM,
+            );
             text(&ip, x + 10.0, 348.0, 22.0, theme::ACCENT);
         } else {
             self.ui.text_field(
@@ -1083,10 +1104,10 @@ impl App {
         } else {
             "BACK TO LOBBY"
         };
-        if self.ui.button(
-            Rect::new(cx - 110.0, VH - 110.0, 220.0, 46.0),
-            back_to,
-        ) {
+        if self
+            .ui
+            .button(Rect::new(cx - 110.0, VH - 110.0, 220.0, 46.0), back_to)
+        {
             self.results = None;
             self.screen = if self.room.is_some() {
                 Screen::Room

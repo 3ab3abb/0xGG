@@ -5,7 +5,7 @@ use gg_shared::game::{buttons, Tile, DT, PLAYER_H, PLAYER_W, TILE};
 use gg_shared::udp::{EventKind, KillCause, ProjectileKind};
 use gg_shared::weapons::{Weapon, ALL_WEAPONS, FIREWALL_H, FIREWALL_W, ITEM_H, ITEM_W};
 
-use super::{secs, Game};
+use super::{secs, Game, MAX_REWIND_TICKS};
 
 const PICKUP_RANGE: f32 = 18.0;
 const SPAWNER_RESPAWN_TICKS: u32 = secs(8.0);
@@ -141,6 +141,44 @@ impl Game {
             Tile::Solid => Some(top),
             Tile::Platform if y0 <= top + 0.5 => Some(top),
             _ => None,
+        }
+    }
+
+    // ------------------------------------------------- lag compensation
+
+    /// Other players' hitboxes as player `viewer` saw them: rewound to its
+    /// `view_tick` (clamped to `MAX_REWIND_TICKS`), or `None` to use the
+    /// present (lag compensation off, or nothing to rewind).
+    fn rewound_bodies(&self, viewer: usize) -> Option<Vec<(f32, f32, bool)>> {
+        if !self.lag_comp {
+            return None;
+        }
+        let oldest = self.tick.saturating_sub(MAX_REWIND_TICKS);
+        let want = self.players[viewer].view_tick.clamp(oldest, self.tick);
+        let first = self.history.front()?.tick;
+        // History holds consecutive ticks; before its start (new round) use
+        // the oldest frame we have.
+        let idx = want.saturating_sub(first) as usize;
+        let frame = self.history.get(idx)?;
+        log::trace!(
+            "room {}: 0x{:02X} rewound {} ticks",
+            self.room_id,
+            self.players[viewer].slot,
+            self.tick - frame.tick
+        );
+        Some(frame.bodies.clone())
+    }
+
+    /// Player `j`'s hitbox top-left, in the present or in `view`. A target
+    /// must be alive now (can't kill twice) and in the rewound frame.
+    fn body(&self, j: usize, view: Option<&[(f32, f32, bool)]>) -> Option<(f32, f32)> {
+        let p = &self.players[j];
+        if !p.alive {
+            return None;
+        }
+        match view.and_then(|v| v.get(j)) {
+            Some(&(x, y, alive)) => alive.then_some((x, y)),
+            None => Some((p.sim.x, p.sim.y)),
         }
     }
 
@@ -452,7 +490,9 @@ impl Game {
     }
 
     /// March a ray in 2 px steps until it hits a wall, a firewall or a packet.
+    /// Packets are tested where `ignore` (the shooter) saw them.
     fn ray(&self, from: (f32, f32), dir: (f32, f32), ignore: usize) -> (Hit, (f32, f32)) {
+        let view = self.rewound_bodies(ignore);
         const STEP: f32 = 2.0;
         let steps = (PISTOL_RANGE / STEP) as i32;
         let mut pt = from;
@@ -467,12 +507,14 @@ impl Game {
             if self.firewall_at(pt.0, pt.1) {
                 return (Hit::Firewall, pt);
             }
-            for (j, p) in self.players.iter().enumerate() {
-                if j != ignore
-                    && p.alive
-                    && inside(pt.0, pt.1, p.sim.x, p.sim.y, PLAYER_W, PLAYER_H)
-                {
-                    return (Hit::Player(j), pt);
+            for j in 0..self.players.len() {
+                if j == ignore {
+                    continue;
+                }
+                if let Some((x, y)) = self.body(j, view.as_deref()) {
+                    if inside(pt.0, pt.1, x, y, PLAYER_W, PLAYER_H) {
+                        return (Hit::Player(j), pt);
+                    }
                 }
             }
         }
@@ -523,16 +565,16 @@ impl Game {
             } else {
                 (s.x - BLADE_REACH, s.y - 3.0, BLADE_REACH, PLAYER_H + 6.0)
             };
+            // The swing hits whoever the swinger saw inside the blade.
+            let view = self.rewound_bodies(i);
             let victims: Vec<usize> = (0..self.players.len())
                 .filter(|&j| {
-                    let v = &self.players[j];
                     j != i
-                        && v.alive
                         // Two blades swinging at each other parry.
                         && !self.reflecting(j)
-                        && gg_shared::game::overlap(
-                            bx, by, bw, bh, v.sim.x, v.sim.y, PLAYER_W, PLAYER_H,
-                        )
+                        && self.body(j, view.as_deref()).is_some_and(|(x, y)| {
+                            gg_shared::game::overlap(bx, by, bw, bh, x, y, PLAYER_W, PLAYER_H)
+                        })
                 })
                 .collect();
             for j in victims {
@@ -749,6 +791,118 @@ impl Game {
                 self.items[k] = it;
                 k += 1;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::Phase;
+    use gg_shared::game::builtin_map;
+    use std::net::UdpSocket;
+
+    /// 0x01 stands on the ground facing 0x02's spot; 0x03 is out of the way.
+    /// Returns the game and the tick at which 0x02 stood in the line of fire
+    /// (`seen`); one tick later it has moved 100 px up, out of the line.
+    fn moved_target(lag_comp: bool, target_dx: f32) -> (Game, u32) {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let slots = (1..=3).map(|s| (s, format!("p{s}"))).collect();
+        let mut g = Game::new(1, builtin_map("router").unwrap(), slots, socket);
+        g.lag_comp = lag_comp;
+        while !matches!(g.phase, Phase::Playing(_)) {
+            g.step();
+        }
+        for _ in 0..30 {
+            g.step(); // settle on the ground
+        }
+        g.players[2].alive = false;
+        let (sx, sy) = (g.players[0].sim.x, g.players[0].sim.y);
+        let right = sx < g.map.pixel_width() / 2.0; // face the middle
+        g.players[0].sim.facing_right = right;
+        g.players[0].aim_up = false;
+        let dir = if right { 1.0 } else { -1.0 };
+
+        g.players[1].sim.x = sx + dir * target_dx;
+        g.players[1].sim.y = sy;
+        g.tick += 1;
+        g.record_history();
+        let seen = g.tick;
+
+        g.players[1].sim.y = sy - 100.0;
+        g.tick += 1;
+        g.record_history();
+        g.players[0].view_tick = seen;
+        (g, seen)
+    }
+
+    fn give(g: &mut Game, i: usize, weapon: Weapon) {
+        g.players[i].held = Some(Held {
+            weapon,
+            ammo: weapon.max_ammo(),
+        });
+        g.players[i].cooldown = 0;
+    }
+
+    #[test]
+    fn pistol_hits_where_the_shooter_saw_the_target() {
+        let (mut g, _) = moved_target(true, 60.0);
+        give(&mut g, 0, Weapon::PingPistol);
+        g.fire(0);
+        assert!(!g.players[1].alive, "rewound shot should hit");
+        assert_eq!(g.players[0].stats.kills, 1);
+    }
+
+    #[test]
+    fn without_lag_comp_the_same_shot_misses() {
+        let (mut g, _) = moved_target(false, 60.0);
+        give(&mut g, 0, Weapon::PingPistol);
+        g.fire(0);
+        assert!(g.players[1].alive, "present-time shot should miss");
+    }
+
+    #[test]
+    fn present_target_still_hit_with_lag_comp() {
+        // Sanity: the line of fire is clear, so the setup isn't what misses.
+        let (mut g, seen) = moved_target(true, 60.0);
+        g.players[1].sim.y = g.players[0].sim.y;
+        g.players[0].view_tick = seen + 1;
+        g.history.back_mut().unwrap().bodies[1].1 = g.players[0].sim.y;
+        give(&mut g, 0, Weapon::PingPistol);
+        g.fire(0);
+        assert!(!g.players[1].alive);
+    }
+
+    #[test]
+    fn rewind_is_capped() {
+        let (mut g, _) = moved_target(true, 60.0);
+        // The shooter's view is now far older than MAX_REWIND_TICKS.
+        for _ in 0..MAX_REWIND_TICKS + 5 {
+            g.tick += 1;
+            g.record_history();
+        }
+        give(&mut g, 0, Weapon::PingPistol);
+        g.fire(0);
+        assert!(g.players[1].alive, "a stale view must not rewind that far");
+    }
+
+    #[test]
+    fn dead_targets_cannot_be_hit_in_the_past() {
+        let (mut g, _) = moved_target(true, 60.0);
+        g.players[1].alive = false;
+        give(&mut g, 0, Weapon::PingPistol);
+        g.fire(0);
+        assert_eq!(g.players[0].stats.kills, 0);
+    }
+
+    #[test]
+    fn blade_hits_where_the_swinger_saw_the_target() {
+        for lag_comp in [true, false] {
+            let (mut g, _) = moved_target(lag_comp, PLAYER_W + 6.0);
+            give(&mut g, 0, Weapon::ChecksumBlade);
+            g.players[0].swing = BLADE_SWING_TICKS;
+            g.blade_hits();
+            assert_eq!(!g.players[1].alive, lag_comp, "lag_comp={lag_comp}");
         }
     }
 }
